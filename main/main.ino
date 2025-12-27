@@ -29,6 +29,9 @@ unsigned long lastBlinkToggle = 0;
 bool blinkOn = false;
 unsigned long blinkIntervalMs = 500; // 切换间隔：500ms -> 周期 1s；1000ms -> 周期 2s
 
+// 记录上一次状态，用于检测状态切换
+ModemState previousState = STATE_NO_SIM;
+
 // ========== AT 交互 ==========
 String sendAT(const String &cmd, unsigned long timeoutMs = 1000) {
   while (SerialAT.available()) SerialAT.read(); // 清空缓冲
@@ -84,6 +87,16 @@ void turnOffLed() {
   setLedColor(0, 0, 0);
 }
 
+// 逻辑色映射：某些灯带颜色通道可能互换，使用逻辑色封装便于调整
+void setLogicalGreen() {
+  // 物理通道目前表现为 R<->G 互换，所以把参数交换以确保逻辑上的绿色显示
+  setLedColor(255, 0, 0);
+}
+
+void setLogicalRed() {
+  setLedColor(0, 255, 0);
+}
+
 // ========== setup / loop ===========
 void setup() {
   Serial.begin(115200);
@@ -136,20 +149,27 @@ void loop() {
     } else if (currentState == STATE_SIM_NO_SIGNAL) {
       blinkIntervalMs = 1000; // 1s 切换 -> 2s 周期
     } else {
-      blinkOn = true;
+        // 有信号时保持亮态（绿灯），并确保重置闪烁定时器
+        blinkOn = true;
     }
+      // 如果状态发生变化，重置闪烁定时器，立即应用新状态
+      if (currentState != previousState) {
+        lastBlinkToggle = now;
+        previousState = currentState;
+      }
   }
 
   // 根据状态控制灯
   if (currentState == STATE_SIM_HAS_SIGNAL) {
-    // 绿色常亮
-    setLedColor(0, 255, 0);
+    // 有信号：绿色常亮（不断写入保证灯不被其他逻辑覆盖）
+    setLogicalGreen();
   } else if (currentState == STATE_NO_SIM || currentState == STATE_SIM_NO_SIGNAL) {
+    // 无SIM或有SIM但无信号：红色按配置闪烁
     if (now - lastBlinkToggle >= blinkIntervalMs) {
       lastBlinkToggle = now;
       blinkOn = !blinkOn;
       if (blinkOn) {
-        setLedColor(255, 0, 0);
+        setLogicalRed();
       } else {
         turnOffLed();
       }
