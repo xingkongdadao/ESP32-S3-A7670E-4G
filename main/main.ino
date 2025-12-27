@@ -1,5 +1,9 @@
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <time.h>
 
 static const int RXPin = 17, TXPin = 18;
 static const uint32_t GPSBaud = 115200;
@@ -21,6 +25,66 @@ const unsigned long POLL_INTERVAL = 5000;
 unsigned long lastBlinkToggle = 0;
 const unsigned long BLINK_INTERVAL = 500;
 bool blinkState = false;
+
+// WiFi 上传配置（来自用户）
+const char* WIFI_SSID = "米奇";
+const char* WIFI_PASS = "19963209891";
+
+// 后台 API 配置
+static const char GEO_SENSOR_API_BASE_URL[] = "https://manage.gogotrans.com/api/device/geoSensor/";
+static const char GEO_SENSOR_KEY[] = "mcu_5e3abda8585e4bc79af89ad57af8b3b7";
+static const char GEO_SENSOR_ID[] = "6df617a4-e332-11f0-abbb-9ed80c0d9d5f";
+
+unsigned long lastUpload = 0;
+const unsigned long UPLOAD_INTERVAL = 10000; // 10秒
+
+// 连接 WiFi（阻塞，带超时）
+void wifiConnect() {
+  Serial.print("Connecting to WiFi ");
+  Serial.println(WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("WiFi connected, IP: ");
+    Serial.println(WiFi.localIP());
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  } else {
+    Serial.println("WiFi connect failed");
+  }
+}
+
+// 通过 WiFi 发起任意 HTTP 方法请求（例如 PATCH），返回是否成功
+bool wifiHttpRequest(const String &method, const String &url, const String &json) {
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient https;
+  Serial.print("WiFi ");
+  Serial.print(method);
+  Serial.print(" to: ");
+  Serial.println(url);
+  if (!https.begin(client, url)) {
+    Serial.println("HTTPS begin failed");
+    return false;
+  }
+  https.addHeader("Content-Type", "application/json");
+  https.addHeader("x-api-key", String(GEO_SENSOR_KEY));
+  int httpCode = https.sendRequest(method.c_str(), (uint8_t*)json.c_str(), json.length());
+  Serial.print("HTTP code: ");
+  Serial.println(httpCode);
+  if (httpCode > 0) {
+    String payload = https.getString();
+    Serial.print("Payload: ");
+    Serial.println(payload);
+  }
+  https.end();
+  return (httpCode >= 200 && httpCode < 300);
+}
 
 void SentSerial(const char *p_char) {
   for (int i = 0; i < strlen(p_char); i++) {
@@ -103,6 +167,8 @@ void setup() {
 
   strip.begin();
   strip.show(); // 初始化关闭
+  // 连接 WiFi（优先）
+  wifiConnect();
 
   while (!SentMessage("AT", 2000)) {
     delay(1000);
@@ -130,4 +196,70 @@ void loop() {
   }
 
   updateLEDState();
+ 
+  // 优先通过 WiFi 上传
+  if (WiFi.status() == WL_CONNECTED) {
+    if (now - lastUpload >= UPLOAD_INTERVAL) {
+      lastUpload = now;
+      // 构建上传数据（占位，后续可替换为真实传感器数据）
+      double latitude = 0.0;
+      double longitude = 0.0;
+      double altitude = 0.0;
+      double speed = 0.0;
+      int satelliteCount = 0;
+      double locationAccuracy = 0.0;
+      double altitudeAccuracy = 0.0;
+      String dataAcquiredAt = "";
+      // 尝试通过系统时间获取 ISO8601（UTC）
+      time_t nowt = time(nullptr);
+      if (nowt != ((time_t)-1)) {
+        struct tm tm;
+        gmtime_r(&nowt, &tm);
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                 tm.tm_hour, tm.tm_min, tm.tm_sec);
+        dataAcquiredAt = String(buf);
+      }
+
+      String json = "{";
+      json += "\"id\":\"";
+      json += GEO_SENSOR_ID;
+      json += "\",";
+      json += "\"latitude\":";
+      json += String(latitude, 6);
+      json += ",";
+      json += "\"longitude\":";
+      json += String(longitude, 6);
+      json += ",";
+      json += "\"altitude\":";
+      json += String(altitude, 2);
+      json += ",";
+      json += "\"speed\":";
+      json += String(speed, 2);
+      json += ",";
+      json += "\"satelliteCount\":";
+      json += String(satelliteCount);
+      json += ",";
+      json += "\"locationAccuracy\":";
+      json += String(locationAccuracy, 2);
+      json += ",";
+      json += "\"altitudeAccuracy\":";
+      json += String(altitudeAccuracy, 2);
+      json += ",";
+      json += "\"dataAcquiredAt\":\"";
+      json += dataAcquiredAt;
+      json += "\",";
+      json += "\"networkSource\":\"WiFi\"";
+      json += "}";
+
+      Serial.println("Uploading via WiFi (PATCH)...");
+      String fullUrl = String(GEO_SENSOR_API_BASE_URL) + String(GEO_SENSOR_ID) + String("/");
+      bool ok = wifiHttpRequest("PATCH", fullUrl, json);
+      Serial.print("WiFi upload result: ");
+      Serial.println(ok ? "OK" : "FAILED");
+    }
+  } else {
+    // 若未连接 WiFi，可考虑使用 4G（保留原有逻辑）
+  }
 }
