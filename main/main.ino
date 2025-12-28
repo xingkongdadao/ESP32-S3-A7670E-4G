@@ -21,6 +21,22 @@ String rev;
 
 bool simPresent = false;
 bool networkRegistered = false;
+bool pdpActive = false;  // 全局PDP状态变量
+
+// GPS数据结构
+struct GPSData {
+  double latitude = 0.0;
+  double longitude = 0.0;
+  double altitude = 0.0;
+  double speed = 0.0;
+  int satelliteCount = 0;
+  double locationAccuracy = 0.0;
+  double altitudeAccuracy = 0.0;
+  bool hasFix = false;  // 是否有GPS定位
+  unsigned long lastUpdate = 0;
+};
+
+GPSData currentGPS;
 
 unsigned long lastPoll = 0;
 const unsigned long POLL_INTERVAL = 5000;
@@ -33,8 +49,11 @@ const unsigned long ALT_INTERVAL = 1000; // 交替显示间隔（ms）
 bool altState = false; // true -> show WiFi status; false -> show SIM status
 
 // WiFi 上传配置（来自用户）
-const char* WIFI_SSID = "米奇";
-const char* WIFI_PASS = "19963209891";
+// const char* WIFI_SSID = "米奇";
+// const char* WIFI_PASS = "19963209891";
+
+const char* WIFI_SSID = "iPhone13";
+const char* WIFI_PASS = "1234567890";
 
 // 后台 API 配置
 static const char GEO_SENSOR_API_BASE_URL[] = "https://manage.gogotrans.com/api/device/geoSensor/";
@@ -47,8 +66,8 @@ const unsigned long UPLOAD_INTERVAL = 10000; // 10秒
 // 连接 WiFi（阻塞，带超时）
 void wifiConnect() {
   if (SERIAL_VERBOSE) {
-    Serial.print("Connecting to WiFi ");
-    Serial.println(WIFI_SSID);
+  Serial.print("Connecting to WiFi ");
+  Serial.println(WIFI_SSID);
   }
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -60,10 +79,10 @@ void wifiConnect() {
   if (SERIAL_VERBOSE) Serial.println();
   if (WiFi.status() == WL_CONNECTED) {
     if (SERIAL_VERBOSE) {
-      Serial.print("WiFi connected, IP: ");
-      Serial.println(WiFi.localIP());
-      configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-    } else {
+    Serial.print("WiFi connected, IP: ");
+    Serial.println(WiFi.localIP());
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  } else {
       configTime(0, 0, "pool.ntp.org", "time.nist.gov");
     }
   } else {
@@ -77,25 +96,25 @@ bool wifiHttpRequest(const String &method, const String &url, const String &json
   client.setInsecure();
   HTTPClient https;
   if (SERIAL_VERBOSE) {
-    Serial.print("WiFi ");
-    Serial.print(method);
-    Serial.print(" to: ");
-    Serial.println(url);
+  Serial.print("WiFi ");
+  Serial.print(method);
+  Serial.print(" to: ");
+  Serial.println(url);
   }
   if (!https.begin(client, url)) {
     if (SERIAL_VERBOSE) Serial.println("HTTPS begin failed");
     return false;
   }
   https.addHeader("Content-Type", "application/json");
-  https.addHeader("x-api-key", String(GEO_SENSOR_KEY));
+  https.addHeader("X-API-Key", String(GEO_SENSOR_KEY));
   int httpCode = https.sendRequest(method.c_str(), (uint8_t*)json.c_str(), json.length());
   if (SERIAL_VERBOSE) {
-    Serial.print("HTTP code: ");
-    Serial.println(httpCode);
-    if (httpCode > 0) {
-      String payload = https.getString();
-      Serial.print("Payload: ");
-      Serial.println(payload);
+  Serial.print("HTTP code: ");
+  Serial.println(httpCode);
+  if (httpCode > 0) {
+    String payload = https.getString();
+    Serial.print("Payload: ");
+    Serial.println(payload);
     }
   } else {
     // still consume payload to avoid blocking on some implementations
@@ -103,6 +122,464 @@ bool wifiHttpRequest(const String &method, const String &url, const String &json
   }
   https.end();
   return (httpCode >= 200 && httpCode < 300);
+}
+
+// 通过 4G 网络发送 HTTP 请求（使用 SIMCom 模块的 HTTP AT 命令）
+bool cellularHttpRequest(const String &method, const String &url, const String &json) {
+  // 1. 初始化 HTTP（带重试机制）
+  if (SERIAL_VERBOSE) Serial.println("初始化 HTTP 会话...");
+  bool httpInitSuccess = false;
+
+  // 先尝试终止可能存在的旧会话
+  SentSerial("AT+HTTPTERM");
+  waitForResponse("OK", 2000);
+
+  delay(1000); // 等待会话完全清理
+
+  // 重试HTTP初始化，最多3次
+  for (int retry = 0; retry < 3 && !httpInitSuccess; retry++) {
+    if (retry > 0) {
+      if (SERIAL_VERBOSE) Serial.println("重试HTTP初始化...");
+      delay(2000); // 重试间隔
+    }
+
+    SentSerial("AT+HTTPINIT");
+    if (waitForResponse("OK", 5000)) {
+      httpInitSuccess = true;
+      if (SERIAL_VERBOSE) Serial.println("HTTP 初始化成功");
+    } else {
+      if (SERIAL_VERBOSE) Serial.println("HTTP 初始化失败，尝试终止会话...");
+      SentSerial("AT+HTTPTERM");
+      waitForResponse("OK", 2000);
+    }
+  }
+
+  if (!httpInitSuccess) {
+    if (SERIAL_VERBOSE) Serial.println("HTTP 初始化最终失败");
+    return false;
+  }
+
+  // 2. 设置 HTTP 参数 - URL
+  if (SERIAL_VERBOSE) Serial.println("设置 HTTP URL...");
+  String urlCmd = "AT+HTTPPARA=\"URL\",\"" + url + "\"";
+  SentSerial(urlCmd.c_str());
+  if (!waitForResponse("OK", 3000)) {
+    if (SERIAL_VERBOSE) Serial.println("URL 设置失败");
+    httpCleanup();
+    return false;
+  }
+
+  // 3. 设置 Content-Type header
+  if (SERIAL_VERBOSE) Serial.println("设置 Content-Type...");
+  SentSerial("AT+HTTPPARA=\"CONTENT\",\"application/json\"");
+  if (!waitForResponse("OK", 3000)) {
+    if (SERIAL_VERBOSE) Serial.println("Content-Type 设置失败");
+    httpCleanup();
+    return false;
+  }
+
+  // 4. 设置自定义 headers (尝试不同的方法)
+  if (SERIAL_VERBOSE) Serial.println("尝试设置 API Key header...");
+
+  // 方法1: 使用USERDATA参数 - 使用标准header格式
+  String apiKeyHeader = "X-API-Key: " + String(GEO_SENSOR_KEY);
+  String headerCmd = "AT+HTTPPARA=\"USERDATA\",\"" + apiKeyHeader + "\"";
+  SentSerial(headerCmd.c_str());
+  if (!waitForResponse("OK", 3000)) {
+    if (SERIAL_VERBOSE) Serial.println("USERDATA 方法失败，尝试其他方法...");
+
+    // 方法2: 有些模块不支持USERDATA，跳过header设置
+    if (SERIAL_VERBOSE) Serial.println("跳过自定义headers设置，继续其他步骤...");
+  } else {
+    if (SERIAL_VERBOSE) Serial.println("API Key header 设置成功");
+  }
+
+  // 5. 设置数据长度并发送数据（带重试）
+  if (SERIAL_VERBOSE) Serial.println("发送数据...");
+  bool dataSendSuccess = false;
+
+  for (int retry = 0; retry < 2 && !dataSendSuccess; retry++) {
+    if (retry > 0) {
+      if (SERIAL_VERBOSE) Serial.println("重试数据发送...");
+      delay(1000);
+    }
+
+    String dataCmd = "AT+HTTPDATA=" + String(json.length()) + ",10000";
+    SentSerial(dataCmd.c_str());
+    if (waitForResponse("DOWNLOAD", 5000)) {
+      // 发送 JSON 数据
+      delay(500); // 等待模块准备接收数据
+      SentSerial(json.c_str());
+      if (waitForResponse("OK", 8000)) {
+        dataSendSuccess = true;
+        if (SERIAL_VERBOSE) Serial.println("数据发送成功");
+      } else {
+        if (SERIAL_VERBOSE) Serial.println("数据发送响应失败");
+      }
+    } else {
+      if (SERIAL_VERBOSE) Serial.println("HTTPDATA 命令失败");
+    }
+  }
+
+  if (!dataSendSuccess) {
+    if (SERIAL_VERBOSE) Serial.println("数据发送最终失败");
+    httpCleanup();
+    return false;
+  }
+
+  // 6. 执行 HTTP 请求 (使用POST方法，服务器返回405表示不支持PATCH)
+  if (SERIAL_VERBOSE) Serial.println("执行 HTTP POST 请求...");
+  SentSerial("AT+HTTPACTION=0");  // 0 = POST method
+  if (!waitForResponse("+HTTPACTION:", 20000)) {  // 增加超时时间
+    if (SERIAL_VERBOSE) Serial.println("HTTP 请求执行失败");
+    httpCleanup();
+    return false;
+  }
+
+  // 7. 解析响应并清理
+  delay(1000); // 等待响应完全接收
+  String response = getLastResponse();
+  httpCleanup();  // 在获取响应后清理
+
+  if (SERIAL_VERBOSE) {
+    Serial.print("解析HTTP响应: '");
+    Serial.print(response);
+    Serial.println("'");
+  }
+
+  // 检查各种可能的成功响应格式
+  bool success = false;
+  if (response.indexOf("200") != -1) {
+    // 包含200状态码，认为是成功的
+    success = true;
+    if (SERIAL_VERBOSE) Serial.println("✓ 检测到HTTP 200成功状态码");
+  } else if (response.indexOf("+HTTPACTION: 0,200,") != -1 ||
+             response.indexOf("+HTTPACTION: 1,200,") != -1 ||
+             response.indexOf("+HTTPACTION: 2,200,") != -1) {
+    // 标准的+HTTPACTION格式
+    success = true;
+    if (SERIAL_VERBOSE) Serial.println("✓ 检测到标准HTTPACTION 200响应");
+  }
+
+  if (success) {
+    if (SERIAL_VERBOSE) Serial.println("HTTP 响应: 200 OK");
+    return true;
+  } else {
+    if (SERIAL_VERBOSE) {
+      Serial.print("HTTP 响应失败: ");
+      Serial.println(response);
+    }
+    return false;
+  }
+}
+
+// HTTP 会话清理函数
+void httpCleanup() {
+  if (SERIAL_VERBOSE) Serial.println("终止 HTTP 会话...");
+  SentSerial("AT+HTTPTERM");
+  waitForResponse("OK", 3000);
+}
+
+// 等待指定响应
+bool waitForResponse(const String &expected, unsigned long timeout) {
+  unsigned long start = millis();
+  String buffer = "";
+
+  while (millis() - start < timeout) {
+    if (Serial1.available()) {
+      char c = Serial1.read();
+      buffer += c;
+
+      if (buffer.indexOf(expected) != -1) {
+        return true;
+      }
+
+      // 如果收到 ERROR，也返回 false
+      if (buffer.indexOf("ERROR") != -1) {
+        return false;
+      }
+    }
+    delay(10);
+  }
+
+  return false;
+}
+
+// 检查PDP状态（独立于LED显示）
+void checkPDPStatus() {
+  static unsigned long lastPdpCheck = 0;
+  static bool lastPdpStatus = false;
+
+  // 每5秒检查一次PDP状态，避免过于频繁的查询
+  if (millis() - lastPdpCheck >= 5000) {
+    lastPdpCheck = millis();
+
+    Serial.println("🔍🔍🔍 CHECKING_PDP_STATUS - 检查PDP状态 🔍🔍🔍");
+    if (SERIAL_VERBOSE) Serial.println("检查 PDP 状态...");
+
+    SentSerial("AT+CGPADDR");
+    delay(300); // 给模块更多响应时间
+
+    unsigned long tstart = millis();
+    String resp = "";
+    int responseTimeout = 4000; // 增加超时时间到4秒
+
+    // 等待完整响应
+    while (millis() - tstart < responseTimeout) {
+      if (Serial1.available()) {
+        char c = Serial1.read();
+        resp += c;
+        tstart = millis(); // 有数据时重置超时
+      }
+
+      // 检查是否收到完整的AT响应
+      if (resp.indexOf("OK") != -1 || resp.indexOf("ERROR") != -1) {
+        // 再等待一小段时间确保所有数据都收到
+        delay(200);
+        while (Serial1.available()) {
+          resp += (char)Serial1.read();
+        }
+        break;
+      }
+
+      delay(10);
+    }
+
+    // 解析响应，查找IP地址
+    bool pdpActive = false;
+
+    if (SERIAL_VERBOSE) {
+      Serial.print("原始响应: '");
+      Serial.print(resp);
+      Serial.println("'");
+    }
+
+    if (resp.indexOf("+CGPADDR: 1,") != -1) {
+      // 找到第一个PDP上下文的IP地址
+      int ipStart = resp.indexOf("+CGPADDR: 1,") + 12;
+      int ipEnd = resp.indexOf("\r\n", ipStart);
+      if (ipEnd == -1) ipEnd = resp.indexOf("\n", ipStart);
+      if (ipEnd == -1) ipEnd = resp.indexOf("OK", ipStart);
+      if (ipEnd == -1) ipEnd = resp.length();
+
+      String ipAddr = resp.substring(ipStart, ipEnd);
+      ipAddr.trim();
+
+      if (SERIAL_VERBOSE) {
+        Serial.print("提取的IP地址: '");
+        Serial.print(ipAddr);
+        Serial.println("'");
+      }
+
+      // 检查IP地址是否有效（排除0.0.0.0和无效地址）
+      // IPv4地址应该有3个点号，格式为x.x.x.x
+      int dotCount = 0;
+      for (char c : ipAddr) {
+        if (c == '.') dotCount++;
+      }
+
+      pdpActive = (ipAddr.length() >= 7 &&  // 最小IP长度 x.x.x.x
+                   ipAddr != "0.0.0.0" &&
+                   dotCount == 3); // IPv4地址应该有3个点号
+
+      if (SERIAL_VERBOSE) {
+        Serial.print("点号数量: ");
+        Serial.println(dotCount);
+        Serial.print("PDP激活判断: ");
+        Serial.println(pdpActive ? "是" : "否");
+      }
+    } else {
+      if (SERIAL_VERBOSE) {
+        Serial.println("未找到 +CGPADDR: 1, 响应");
+      }
+    }
+
+    lastPdpStatus = pdpActive;
+
+    if (SERIAL_VERBOSE) {
+      Serial.print("PDP 查询响应: ");
+      Serial.println(resp);
+      Serial.print("PDP 激活状态: ");
+      Serial.println(pdpActive ? "激活 ✓" : "未激活 ✗");
+      if (pdpActive) {
+        Serial.println("✓✓✓ 4G网络连接正常 ✓✓✓");
+      } else {
+        Serial.println("⚠️⚠️⚠️ 4G网络连接异常 ⚠️⚠️⚠️");
+      }
+    }
+  }
+
+  pdpActive = lastPdpStatus;
+}
+
+// 获取最后一次响应
+String getLastResponse() {
+  String response = "";
+  unsigned long start = millis();
+
+  while (millis() - start < 1000) {
+    if (Serial1.available()) {
+      char c = Serial1.read();
+      response += c;
+    }
+    delay(10);
+  }
+
+  return response;
+}
+
+// GPS数据解析函数
+bool parseGPSData(const String &response, GPSData &gps) {
+  // 解析SIMCom模块的GPS响应 (AT+CGNSINF格式)
+  // 格式: +CGNSINF: <GNSS run status>,<Fix status>,<UTC date & Time>,<Latitude>,<Longitude>,<MSL Altitude>,<Speed Over Ground>,<Course Over Ground>,<Fix Mode>,<Reserved1>,<HDOP>,<PDOP>,<VDOP>,<Reserved2>,<GNSS Satellites in View>,<GNSS Satellites Used>,<GLONASS Satellites Used>,<Reserved3>,<C/N0 max>,<HPA>,<VPA>
+
+  if (response.indexOf("+CGNSINF:") == -1) {
+    return false;
+  }
+
+  int startIdx = response.indexOf("+CGNSINF:") + 10;
+  String data = response.substring(startIdx);
+  data.trim();
+
+  // 分割逗号分隔的数据
+  int commaCount = 0;
+  int lastComma = -1;
+  String fields[20];
+
+  for (int i = 0; i < data.length() && commaCount < 20; i++) {
+    if (data[i] == ',') {
+      fields[commaCount] = data.substring(lastComma + 1, i);
+      fields[commaCount].trim();
+      lastComma = i;
+      commaCount++;
+    }
+  }
+
+  if (commaCount >= 6) {
+    // fields[1] = Fix status (1=fix, 0=no fix)
+    gps.hasFix = (fields[1].toInt() == 1);
+
+    if (gps.hasFix) {
+      // fields[3] = Latitude
+      gps.latitude = fields[3].toDouble();
+      // fields[4] = Longitude
+      gps.longitude = fields[4].toDouble();
+      // fields[5] = MSL Altitude
+      gps.altitude = fields[5].toDouble();
+      // fields[6] = Speed Over Ground (km/h)
+      gps.speed = fields[6].toDouble();
+      // fields[14] = GNSS Satellites Used
+      gps.satelliteCount = fields[14].toInt();
+
+      // 计算定位精度（基于HDOP，如果可用）
+      if (commaCount >= 11 && fields[10].length() > 0) {
+        double hdop = fields[10].toDouble();
+        gps.locationAccuracy = hdop * 5.0; // 近似计算，HDOP * 5米
+      } else {
+        gps.locationAccuracy = 10.0; // 默认精度
+      }
+
+      gps.altitudeAccuracy = 10.0; // 默认海拔精度
+      gps.lastUpdate = millis();
+
+      if (SERIAL_VERBOSE) {
+        Serial.println("GPS定位成功:");
+        Serial.print("  纬度: "); Serial.println(gps.latitude, 6);
+        Serial.print("  经度: "); Serial.println(gps.longitude, 6);
+        Serial.print("  海拔: "); Serial.println(gps.altitude, 2);
+        Serial.print("  速度: "); Serial.println(gps.speed, 2);
+        Serial.print("  卫星: "); Serial.println(gps.satelliteCount);
+      }
+
+      return true;
+    } else {
+      if (SERIAL_VERBOSE) Serial.println("GPS未定位");
+      return false;
+    }
+  }
+
+  return false;
+}
+
+// 获取GPS数据
+bool getGPSData() {
+  if (SERIAL_VERBOSE) Serial.println("获取GPS数据...");
+
+  // 发送GPS信息查询命令
+  SentSerial("AT+CGNSINF");
+  delay(500); // 等待GPS响应
+
+  // 读取响应
+  String response = "";
+  unsigned long start = millis();
+  bool gotResponse = false;
+
+  while (millis() - start < 2000 && !gotResponse) {
+    if (Serial1.available()) {
+      char c = Serial1.read();
+      response += c;
+
+      if (response.indexOf("OK") != -1 || response.indexOf("ERROR") != -1) {
+        gotResponse = true;
+      }
+    }
+    delay(10);
+  }
+
+  if (SERIAL_VERBOSE) {
+    Serial.print("GPS响应: ");
+    Serial.println(response);
+  }
+
+  // 解析GPS数据
+  if (parseGPSData(response, currentGPS)) {
+    return true;
+  } else {
+    // 如果解析失败，保持上一次的数据或设置为0
+    if (millis() - currentGPS.lastUpdate > 300000) { // 5分钟超时
+      currentGPS.latitude = 0.0;
+      currentGPS.longitude = 0.0;
+      currentGPS.altitude = 0.0;
+      currentGPS.speed = 0.0;
+      currentGPS.satelliteCount = 0;
+      currentGPS.hasFix = false;
+    }
+    return false;
+  }
+}
+
+// 初始化GPS功能
+void initGPS() {
+  if (SERIAL_VERBOSE) Serial.println("初始化GPS功能...");
+
+  // 检查GNSS功能是否支持
+  SentSerial("AT+CGNSSMOD?");
+  if (waitForResponse("OK", 3000)) {
+    if (SERIAL_VERBOSE) Serial.println("GNSS功能支持检查完成");
+  }
+
+  // 开启GNSS电源
+  SentSerial("AT+CGNSPWR=1");
+  if (waitForResponse("OK", 3000)) {
+    if (SERIAL_VERBOSE) Serial.println("GNSS电源开启成功");
+  } else {
+    if (SERIAL_VERBOSE) Serial.println("GNSS电源开启失败，GPS功能可能不可用");
+    return;
+  }
+
+  // 设置GNSS模式为GPS + GLONASS（如果支持）
+  SentSerial("AT+CGNSMOD=1,1,0,0");
+  waitForResponse("OK", 3000);
+
+  // 开启NMEA数据输出
+  SentSerial("AT+CGNSURC=1");
+  waitForResponse("OK", 3000);
+
+  // 设置GNSS信息输出间隔（可选）
+  SentSerial("AT+CGNSINF=1");
+  waitForResponse("OK", 3000);
+
+  if (SERIAL_VERBOSE) Serial.println("GPS初始化完成");
 }
 
 void SentSerial(const char *p_char) {
@@ -135,11 +612,31 @@ bool SentMessage(const char *p_char, unsigned long timeout = 2000) {
 void setColor(bool r, bool g, bool b) {
   // 如果硬件通道与逻辑颜色不一致，可在这里映射物理通道
   // 下面将逻辑 R/G 互换以适配某些 WS2812B 的通道顺序
-  uint8_t physR = g ? 255 : 0;
-  uint8_t physG = r ? 255 : 0;
-  uint8_t physB = b ? 255 : 0;
+  // 亮度降低为50% (255 * 0.5 = 127)
+  uint8_t physR = g ? 127 : 0;
+  uint8_t physG = r ? 127 : 0;
+  uint8_t physB = b ? 127 : 0;
   strip.setPixelColor(0, strip.Color(physR, physG, physB));
   strip.show();
+}
+
+// 上传成功闪烁效果 - 快速闪3下
+void flashSuccess() {
+  // 保存当前颜色状态
+  uint32_t currentColor = strip.getPixelColor(0);
+
+  // 快速闪烁3次 (白色亮度50%)
+  for (int i = 0; i < 3; i++) {
+    // 白色闪烁
+    strip.setPixelColor(0, strip.Color(127, 127, 127));
+    strip.show();
+    delay(100);
+
+    // 恢复原色
+    strip.setPixelColor(0, currentColor);
+    strip.show();
+    delay(100);
+  }
 }
 
 void updateLEDState() {
@@ -179,74 +676,7 @@ void updateLEDState() {
     return;
   }
 
-  // 有 SIM：判断是否注册与是否有数据承载（PDP）
-  // 尝试查询 PDP/IP 地址，若能获得非 0.0.0.0 的 IP 则认为有网络
-  // 修复：使用更可靠的查询方式，避免干扰其他AT命令
-  static unsigned long lastPdpCheck = 0;
-  static bool lastPdpStatus = false;
-
-  // 每5秒检查一次PDP状态，避免过于频繁的查询
-  if (millis() - lastPdpCheck >= 5000) {
-    lastPdpCheck = millis();
-
-    if (SERIAL_VERBOSE) Serial.println("检查 PDP 状态...");
-
-    SentSerial("AT+CGPADDR");
-    delay(100); // 给模块一点响应时间
-
-    unsigned long tstart = millis();
-    String resp = "";
-    bool gotResponse = false;
-
-    // 等待完整响应，超时2秒
-    while (millis() - tstart < 2000 && !gotResponse) {
-      if (Serial1.available()) {
-        char c = Serial1.read();
-        resp += c;
-
-        // 检查是否收到完整的响应
-        if (resp.indexOf("OK") != -1 || resp.indexOf("ERROR") != -1) {
-          gotResponse = true;
-        }
-      }
-      delay(10);
-    }
-
-    // 解析响应，查找IP地址
-    bool pdpActive = false;
-    if (resp.indexOf("+CGPADDR: 1,") != -1) {
-      // 检查是否包含有效的IP地址（不是0.0.0.0）
-      int ipStart = resp.indexOf("+CGPADDR: 1,") + 12;
-      int ipEnd = resp.indexOf("\n", ipStart);
-      if (ipEnd == -1) ipEnd = resp.indexOf("OK", ipStart);
-      if (ipEnd == -1) ipEnd = resp.length();
-
-      String ipAddr = resp.substring(ipStart, ipEnd);
-      ipAddr.trim();
-
-      // 检查IP地址是否有效
-      pdpActive = (ipAddr.length() > 0 &&
-                   ipAddr != "0.0.0.0" &&
-                   ipAddr.indexOf('.') != -1 &&
-                   !ipAddr.startsWith("0."));
-    }
-
-    lastPdpStatus = pdpActive;
-
-    if (SERIAL_VERBOSE) {
-      Serial.print("PDP 查询响应: ");
-      Serial.println(resp);
-      Serial.print("PDP 激活状态: ");
-      Serial.println(pdpActive ? "激活 ✓" : "未激活 ✗");
-      if (pdpActive) {
-        Serial.println("✓✓✓ 4G网络连接正常 ✓✓✓");
-      } else {
-        Serial.println("⚠️⚠️⚠️ 4G网络连接异常 ⚠️⚠️⚠️");
-      }
-    }
-  }
-
-  bool pdpActive = lastPdpStatus;
+  // PDP状态现在由checkPDPStatus函数独立管理
 
   if (!networkRegistered) {
     // 有 SIM 但未注册：蓝色闪烁
@@ -516,6 +946,12 @@ void setup() {
   Serial.println("🚀🚀🚀 CALLING_CONFIGURE_FUNCTION - 调用配置函数 🚀🚀🚀");
   configureAPNAndActivatePDP();
 
+  // 初始化GPS功能
+  if (SERIAL_VERBOSE) {
+    Serial.println("\n=== 初始化GPS功能 ===");
+  }
+  initGPS();
+
   if (SERIAL_VERBOSE) {
     Serial.println("=== 初始化完成 ===\n");
   }
@@ -526,7 +962,7 @@ void loop() {
     rev = Serial1.readString();
     if (SERIAL_VERBOSE) {
       Serial.print("收到模块响应: ");
-      Serial.println(rev);
+    Serial.println(rev);
     }
     parseModuleResponse(rev);
   }
@@ -537,6 +973,12 @@ void loop() {
     if (SERIAL_VERBOSE) Serial.println("--- 状态轮询 ---");
     SentSerial("AT+CPIN?");
     SentSerial("AT+CGREG?");
+
+    // 定期获取GPS数据
+    getGPSData();
+
+    // 定期检查PDP状态（独立于LED显示）
+    checkPDPStatus();
   }
 
   updateLEDState();
@@ -545,18 +987,18 @@ void loop() {
   if (WiFi.status() == WL_CONNECTED) {
     if (now - lastUpload >= UPLOAD_INTERVAL) {
       lastUpload = now;
-      // 构建上传数据（占位，后续可替换为真实传感器数据）
-      double latitude = 0.0;
-      double longitude = 0.0;
-      double altitude = 0.0;
-      double speed = 0.0;
-      int satelliteCount = 0;
-      double locationAccuracy = 0.0;
-      double altitudeAccuracy = 0.0;
+      // 使用GPS数据，如果没有GPS信号则使用0数据
+      double latitude = currentGPS.hasFix ? currentGPS.latitude : 0.0;
+      double longitude = currentGPS.hasFix ? currentGPS.longitude : 0.0;
+      double altitude = currentGPS.hasFix ? currentGPS.altitude : 0.0;
+      double speed = currentGPS.hasFix ? currentGPS.speed : 0.0;
+      int satelliteCount = currentGPS.hasFix ? currentGPS.satelliteCount : 0;
+      double locationAccuracy = currentGPS.hasFix ? currentGPS.locationAccuracy : 0.0;
+      double altitudeAccuracy = currentGPS.hasFix ? currentGPS.altitudeAccuracy : 0.0;
       String dataAcquiredAt = "";
       // 尝试通过系统时间获取 ISO8601（UTC）
       time_t nowt = time(nullptr);
-      if (nowt != ((time_t)-1)) {
+      if (nowt > 1609459200) { // 检查时间是否合理 (2021年后的时间戳)
         struct tm tm;
         gmtime_r(&nowt, &tm);
         char buf[32];
@@ -564,6 +1006,17 @@ void loop() {
                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                  tm.tm_hour, tm.tm_min, tm.tm_sec);
         dataAcquiredAt = String(buf);
+      } else {
+        // 如果时间无效，使用当前运行时间作为近似值
+        unsigned long uptime = millis();
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                 2024, 12, 29,  // 使用编译日期作为基准
+                 (uptime / 3600000) % 24,  // 小时
+                 (uptime / 60000) % 60,    // 分钟
+                 (uptime / 1000) % 60);    // 秒
+        dataAcquiredAt = String(buf);
+        if (SERIAL_VERBOSE) Serial.println("使用运行时间作为时间戳: " + dataAcquiredAt);
       }
 
       String json = "{";
@@ -598,14 +1051,97 @@ void loop() {
       json += "}";
 
       String fullUrl = String(GEO_SENSOR_API_BASE_URL) + String(GEO_SENSOR_ID) + String("/");
-      if (SERIAL_VERBOSE) Serial.println("正在通过 WiFi 上传数据 (PATCH)...");
+      if (SERIAL_VERBOSE) {
+        Serial.println("正在通过 WiFi 上传数据 (PATCH)...");
+        Serial.println("目标URL: " + fullUrl);
+        Serial.println("发送数据: " + json);
+      }
       bool ok = wifiHttpRequest("PATCH", fullUrl, json);
       if (SERIAL_VERBOSE) {
-        Serial.print("WiFi upload result: ");
-        Serial.println(ok ? "OK" : "FAILED");
+      Serial.print("WiFi upload result: ");
+      Serial.println(ok ? "OK" : "FAILED");
+      }
+      // 上传成功时闪烁提示
+      if (ok) {
+        flashSuccess();
       }
     }
   } else {
-    // 若未连接 WiFi，可考虑使用 4G（保留原有逻辑）
+    // WiFi 不可用，尝试使用 4G 网络上传
+    if (now - lastUpload >= UPLOAD_INTERVAL) {
+      lastUpload = now;
+      // 检查 PDP 是否激活
+      if (pdpActive) {
+        // 使用GPS数据，如果没有GPS信号则使用0数据
+        double latitude = currentGPS.hasFix ? currentGPS.latitude : 0.0;
+        double longitude = currentGPS.hasFix ? currentGPS.longitude : 0.0;
+        double altitude = currentGPS.hasFix ? currentGPS.altitude : 0.0;
+        double speed = currentGPS.hasFix ? currentGPS.speed : 0.0;
+        int satelliteCount = currentGPS.hasFix ? currentGPS.satelliteCount : 0;
+        double locationAccuracy = currentGPS.hasFix ? currentGPS.locationAccuracy : 0.0;
+        double altitudeAccuracy = currentGPS.hasFix ? currentGPS.altitudeAccuracy : 0.0;
+        String dataAcquiredAt = "";
+        // 尝试通过系统时间获取 ISO8601（UTC）
+        time_t nowt = time(nullptr);
+        if (nowt != ((time_t)-1)) {
+          struct tm tm;
+          gmtime_r(&nowt, &tm);
+          char buf[32];
+          snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                   tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                   tm.tm_hour, tm.tm_min, tm.tm_sec);
+          dataAcquiredAt = String(buf);
+        }
+
+        String json = "{";
+        json += "\"id\":\"";
+        json += GEO_SENSOR_ID;
+        json += "\",";
+        json += "\"latitude\":";
+        json += String(latitude, 6);
+        json += ",";
+        json += "\"longitude\":";
+        json += String(longitude, 6);
+        json += ",";
+        json += "\"altitude\":";
+        json += String(altitude, 2);
+        json += ",";
+        json += "\"speed\":";
+        json += String(speed, 2);
+        json += ",";
+        json += "\"satelliteCount\":";
+        json += String(satelliteCount);
+        json += ",";
+        json += "\"locationAccuracy\":";
+        json += String(locationAccuracy, 2);
+        json += ",";
+        json += "\"altitudeAccuracy\":";
+        json += String(altitudeAccuracy, 2);
+        json += ",";
+        json += "\"dataAcquiredAt\":\"";
+        json += dataAcquiredAt;
+        json += "\",";
+        json += "\"networkSource\":\"4G\"";
+        json += "}";
+
+        String fullUrl = String(GEO_SENSOR_API_BASE_URL) + String(GEO_SENSOR_ID) + String("/");
+        if (SERIAL_VERBOSE) {
+          Serial.println("正在通过 4G 网络上传数据 (POST)...");
+          Serial.println("目标URL: " + fullUrl);
+          Serial.println("发送数据: " + json);
+        }
+        bool ok = cellularHttpRequest("POST", fullUrl, json);
+        if (SERIAL_VERBOSE) {
+          Serial.print("4G upload result: ");
+          Serial.println(ok ? "OK" : "FAILED");
+        }
+        // 上传成功时闪烁提示
+        if (ok) {
+          flashSuccess();
+        }
+      } else {
+        if (SERIAL_VERBOSE) Serial.println("4G网络未激活，跳过数据上传");
+      }
+    }
   }
 }
