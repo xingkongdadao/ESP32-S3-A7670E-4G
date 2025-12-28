@@ -25,6 +25,9 @@ const unsigned long POLL_INTERVAL = 5000;
 unsigned long lastBlinkToggle = 0;
 const unsigned long BLINK_INTERVAL = 500;
 bool blinkState = false;
+unsigned long lastAltToggle = 0;
+const unsigned long ALT_INTERVAL = 1000; // 交替显示间隔（ms）
+bool altState = false; // true -> show WiFi status; false -> show SIM status
 
 // WiFi 上传配置（来自用户）
 const char* WIFI_SSID = "米奇";
@@ -124,15 +127,33 @@ void setColor(bool r, bool g, bool b) {
 }
 
 void updateLEDState() {
-  if (networkRegistered) {
-    // 网络已注册：绿色常亮
-    setColor(false, true, false);
+  unsigned long now = millis();
+  // 切换显示 WiFi / SIM 状态（交替）
+  if (now - lastAltToggle >= ALT_INTERVAL) {
+    altState = !altState;
+    lastAltToggle = now;
+  }
+
+  // WiFi 指示阶段
+  if (altState) {
+    if (WiFi.status() == WL_CONNECTED) {
+      // 有 WiFi：橘黄色常亮
+      setColor(true, true, false);
+    } else {
+      // 无 WiFi：橘黄色闪烁
+      if (now - lastBlinkToggle >= BLINK_INTERVAL) {
+        blinkState = !blinkState;
+        lastBlinkToggle = now;
+      }
+      if (blinkState) setColor(true, true, false);
+      else setColor(false, false, false);
+    }
     return;
   }
 
+  // SIM 指示阶段
   if (!simPresent) {
     // 无 SIM：红色闪烁
-    unsigned long now = millis();
     if (now - lastBlinkToggle >= BLINK_INTERVAL) {
       blinkState = !blinkState;
       lastBlinkToggle = now;
@@ -142,8 +163,40 @@ void updateLEDState() {
     return;
   }
 
-  // 有卡但未注册网络：红色常亮
-  setColor(true, false, false);
+  // 有 SIM：判断是否注册与是否有数据承载（PDP）
+  // 尝试查询 PDP/IP 地址，若能获得非 0.0.0.0 的 IP 则认为有网络
+  SentSerial("AT+CGPADDR?");
+  unsigned long tstart = millis();
+  String resp = "";
+  while (millis() - tstart < 800) {
+    if (Serial1.available()) {
+      resp += Serial1.readString();
+    }
+  }
+  Serial.print("AT+CGPADDR 返回: ");
+  Serial.println(resp);
+  bool pdpActive = (resp.indexOf('.') != -1 && resp.indexOf("0.0.0.0") == -1);
+  Serial.print("PDP 激活: ");
+  Serial.println(pdpActive ? "是" : "否");
+
+  if (!networkRegistered) {
+    // 有 SIM 但未注册：蓝色闪烁
+    if (now - lastBlinkToggle >= BLINK_INTERVAL) {
+      blinkState = !blinkState;
+      lastBlinkToggle = now;
+    }
+    if (blinkState) setColor(false, false, true);
+    else setColor(false, false, false);
+  } else {
+    // SIM 已注册
+    if (pdpActive) {
+      // 已注册且有网络：绿色常亮
+      setColor(false, true, false);
+    } else {
+      // 已注册但无网络：蓝色常亮
+      setColor(false, false, true);
+    }
+  }
 }
 
 void parseModuleResponse(const String &response) {
