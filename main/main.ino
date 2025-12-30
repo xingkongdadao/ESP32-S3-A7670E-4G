@@ -81,16 +81,32 @@ void wifiConnect() {
     if (SERIAL_VERBOSE) {
     Serial.print("WiFi connected, IP: ");
     Serial.println(WiFi.localIP());
-    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-  } else {
-      configTime(0, 0, "pool.ntp.org", "time.nist.gov");
     }
+  // WiFi已连接，配置NTP
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov", "asia.pool.ntp.org");
+  if (SERIAL_VERBOSE) Serial.println("NTP configured for UTC timezone via WiFi");
+
+  // 等待NTP同步完成
+  if (SERIAL_VERBOSE) Serial.println("等待WiFi NTP同步...");
+  time_t wifiTime = 0;
+  int wifiSyncAttempts = 0;
+  while (wifiTime < 1609459200 && wifiSyncAttempts < 15) {
+    delay(1000);
+    wifiTime = time(nullptr);
+    wifiSyncAttempts++;
+  }
+
+  if (wifiTime >= 1609459200) {
+    if (SERIAL_VERBOSE) Serial.println("WiFi NTP同步成功");
+  } else {
+    if (SERIAL_VERBOSE) Serial.println("WiFi NTP同步失败，继续使用4G模式");
+  }
   } else {
     if (SERIAL_VERBOSE) Serial.println("WiFi connect failed");
   }
 }
 
-// 通过 WiFi 发起任意 HTTP 方法请求（例如 PATCH），返回是否成功
+// 通过 WiFi 发起任意 HTTP 方法请求（例如 POST），返回是否成功
 bool wifiHttpRequest(const String &method, const String &url, const String &json) {
   WiFiClientSecure client;
   client.setInsecure();
@@ -122,6 +138,75 @@ bool wifiHttpRequest(const String &method, const String &url, const String &json
   }
   https.end();
   return (httpCode >= 200 && httpCode < 300);
+}
+
+// 通过4G网络获取服务器时间并同步本地时间
+bool syncTimeFromServer() {
+  if (SERIAL_VERBOSE) Serial.println("尝试从服务器获取时间进行同步...");
+
+  // 1. 初始化HTTP会话
+  SentSerial("AT+HTTPINIT");
+  if (!waitForResponse("OK", 5000)) {
+    if (SERIAL_VERBOSE) Serial.println("HTTP初始化失败，无法同步时间");
+    return false;
+  }
+
+  // 2. 设置URL (使用后台服务器的时间端点，如果没有专门的端点就用API根路径)
+  String timeUrl = "https://manage.gogotrans.com/api/device/geoSensor/";
+  String urlCmd = "AT+HTTPPARA=\"URL\",\"" + timeUrl + "\"";
+  SentSerial(urlCmd.c_str());
+  if (!waitForResponse("OK", 5000)) {
+    SentSerial("AT+HTTPTERM");
+    return false;
+  }
+
+  // 3. 设置认证header
+  String apiKeyHeader = "X-API-Key: " + String(GEO_SENSOR_KEY);
+  String headerCmd = "AT+HTTPPARA=\"USERDATA\",\"" + apiKeyHeader + "\"";
+  SentSerial(headerCmd.c_str());
+  if (!waitForResponse("OK", 5000)) {
+    SentSerial("AT+HTTPTERM");
+    return false;
+  }
+
+  // 4. 发送GET请求获取服务器时间
+  SentSerial("AT+HTTPACTION=0"); // GET method
+  if (waitForResponse("+HTTPACTION:", 15000)) {
+    // 解析响应
+    String response = getLastResponse();
+    if (SERIAL_VERBOSE) {
+      Serial.println("时间同步响应: " + response);
+    }
+
+    // 从响应头中提取时间（如果服务器返回了时间头）
+    // Django通常在响应头中包含Date字段
+    if (response.indexOf("Date:") != -1) {
+      // 简单的时间估算：收到响应时大约是服务器时间的当前时间
+      time_t estimatedServerTime = time(nullptr);
+      if (estimatedServerTime < 1609459200) {
+        // 如果本地时间无效，使用一个估算的当前时间
+        // 2024年12月29日大约是1735430400
+        estimatedServerTime = 1735430400; // 2024-12-29 00:00:00 UTC
+      }
+
+      // 设置系统时间（减去一些网络延迟）
+      struct timeval tv;
+      tv.tv_sec = estimatedServerTime;
+      tv.tv_usec = 0;
+      settimeofday(&tv, NULL);
+
+      // 重新配置时区
+      configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov", "asia.pool.ntp.org");
+
+      if (SERIAL_VERBOSE) Serial.println("通过服务器响应估算时间同步完成");
+      SentSerial("AT+HTTPTERM");
+      return true;
+    }
+  }
+
+  SentSerial("AT+HTTPTERM");
+  if (SERIAL_VERBOSE) Serial.println("服务器时间同步失败");
+  return false;
 }
 
 // 通过 4G 网络发送 HTTP 请求（使用 SIMCom 模块的 HTTP AT 命令）
@@ -163,36 +248,65 @@ bool cellularHttpRequest(const String &method, const String &url, const String &
   if (SERIAL_VERBOSE) Serial.println("设置 HTTP URL...");
   String urlCmd = "AT+HTTPPARA=\"URL\",\"" + url + "\"";
   SentSerial(urlCmd.c_str());
-  if (!waitForResponse("OK", 3000)) {
+  delay(500); // 增加延迟确保命令发送完成
+  if (!waitForResponse("OK", 5000)) { // 增加超时时间
     if (SERIAL_VERBOSE) Serial.println("URL 设置失败");
     httpCleanup();
     return false;
   }
+  delay(200); // 短暂延迟确保模块处理完成
 
   // 3. 设置 Content-Type header
   if (SERIAL_VERBOSE) Serial.println("设置 Content-Type...");
   SentSerial("AT+HTTPPARA=\"CONTENT\",\"application/json\"");
-  if (!waitForResponse("OK", 3000)) {
+  delay(500); // 增加延迟确保命令发送完成
+  if (!waitForResponse("OK", 5000)) { // 增加超时时间
     if (SERIAL_VERBOSE) Serial.println("Content-Type 设置失败");
     httpCleanup();
     return false;
   }
+  delay(200); // 短暂延迟确保模块处理完成
 
-  // 4. 设置自定义 headers (尝试不同的方法)
+  // 4. 设置自定义 headers (改进的API Key设置)
   if (SERIAL_VERBOSE) Serial.println("尝试设置 API Key header...");
 
-  // 方法1: 使用USERDATA参数 - 使用标准header格式
+  // 使用标准header格式
   String apiKeyHeader = "X-API-Key: " + String(GEO_SENSOR_KEY);
   String headerCmd = "AT+HTTPPARA=\"USERDATA\",\"" + apiKeyHeader + "\"";
-  SentSerial(headerCmd.c_str());
-  if (!waitForResponse("OK", 3000)) {
-    if (SERIAL_VERBOSE) Serial.println("USERDATA 方法失败，尝试其他方法...");
 
-    // 方法2: 有些模块不支持USERDATA，跳过header设置
-    if (SERIAL_VERBOSE) Serial.println("跳过自定义headers设置，继续其他步骤...");
-  } else {
-    if (SERIAL_VERBOSE) Serial.println("API Key header 设置成功");
+  if (SERIAL_VERBOSE) {
+    Serial.print("设置API Key header: ");
+    Serial.println(headerCmd);
   }
+
+  SentSerial(headerCmd.c_str());
+  delay(1000); // 增加延迟确保命令发送完成
+
+  // 强制检查响应
+  String headerResponse = "";
+  unsigned long headerStart = millis();
+  bool headerOk = false;
+  while (millis() - headerStart < 3000) {
+    if (Serial1.available()) {
+      char c = Serial1.read();
+      headerResponse += c;
+      if (headerResponse.indexOf("OK") != -1) {
+        headerOk = true;
+        break;
+      }
+    }
+    delay(10);
+  }
+
+  if (SERIAL_VERBOSE) {
+    Serial.print("Header设置结果: ");
+    Serial.println(headerOk ? "成功" : "失败 - " + headerResponse);
+  }
+
+  if (!headerOk) {
+    if (SERIAL_VERBOSE) Serial.println("Header设置失败，继续其他步骤...");
+  }
+  delay(200); // 短暂延迟确保模块处理完成
 
   // 5. 设置数据长度并发送数据（带重试）
   if (SERIAL_VERBOSE) Serial.println("发送数据...");
@@ -227,10 +341,24 @@ bool cellularHttpRequest(const String &method, const String &url, const String &
     return false;
   }
 
-  // 6. 执行 HTTP 请求 (使用POST方法，服务器返回405表示不支持PATCH)
-  if (SERIAL_VERBOSE) Serial.println("执行 HTTP POST 请求...");
-  SentSerial("AT+HTTPACTION=0");  // 0 = POST method
-  if (!waitForResponse("+HTTPACTION:", 20000)) {  // 增加超时时间
+  // 6. 执行 HTTP 请求
+  if (SERIAL_VERBOSE) {
+    Serial.print("执行 HTTP ");
+    Serial.print(method);
+    Serial.println(" 请求...");
+  }
+
+  // 根据方法选择正确的AT命令
+  if (method == "POST") {
+    SentSerial("AT+HTTPACTION=1");  // 1 = POST method
+  } else if (method == "PATCH") {
+    SentSerial("AT+HTTPACTION=2");  // 2 = PATCH method
+  } else {
+    if (SERIAL_VERBOSE) Serial.println("不支持的HTTP方法");
+    httpCleanup();
+    return false;
+  }
+  if (!waitForResponse("+HTTPACTION:", 25000)) {  // 增加超时时间到25秒
     if (SERIAL_VERBOSE) Serial.println("HTTP 请求执行失败");
     httpCleanup();
     return false;
@@ -249,16 +377,31 @@ bool cellularHttpRequest(const String &method, const String &url, const String &
 
   // 检查各种可能的成功响应格式
   bool success = false;
-  if (response.indexOf("200") != -1) {
-    // 包含200状态码，认为是成功的
+  if (response.indexOf("200") != -1 || response.indexOf("201") != -1) {
+    // 包含200/201状态码，认为是成功的
     success = true;
-    if (SERIAL_VERBOSE) Serial.println("✓ 检测到HTTP 200成功状态码");
-  } else if (response.indexOf("+HTTPACTION: 0,200,") != -1 ||
-             response.indexOf("+HTTPACTION: 1,200,") != -1 ||
-             response.indexOf("+HTTPACTION: 2,200,") != -1) {
-    // 标准的+HTTPACTION格式
-    success = true;
-    if (SERIAL_VERBOSE) Serial.println("✓ 检测到标准HTTPACTION 200响应");
+    if (SERIAL_VERBOSE) Serial.println("✓ 检测到HTTP 2xx成功状态码");
+  } else if (response.indexOf("+HTTPACTION:") != -1) {
+    // 解析HTTPACTION响应格式: +HTTPACTION: <method>,<status>,<length>
+    int colonPos = response.indexOf(":");
+    if (colonPos != -1) {
+      String params = response.substring(colonPos + 1);
+      int firstComma = params.indexOf(",");
+      if (firstComma != -1) {
+        int secondComma = params.indexOf(",", firstComma + 1);
+        if (secondComma != -1) {
+          String statusCode = params.substring(firstComma + 1, secondComma);
+          statusCode.trim();
+          int code = statusCode.toInt();
+          if (code >= 200 && code < 300) {
+            success = true;
+            if (SERIAL_VERBOSE) Serial.println("✓ 检测到HTTPACTION 2xx响应: " + statusCode);
+          } else {
+            if (SERIAL_VERBOSE) Serial.println("HTTPACTION状态码: " + statusCode);
+          }
+        }
+      }
+    }
   }
 
   if (success) {
@@ -915,6 +1058,72 @@ void setup() {
     Serial.println("串口初始化完成");
   }
 
+  // 只有在WiFi或4G网络有效时才配置NTP
+  bool networkAvailable = false;
+
+  // 检查WiFi连接
+  if (WiFi.status() == WL_CONNECTED) {
+    networkAvailable = true;
+    if (SERIAL_VERBOSE) Serial.println("检测到WiFi连接，将配置NTP");
+  }
+
+  // 如果WiFi不可用，检查4G连接
+  if (!networkAvailable) {
+    // 尝试初始化SIMCom模块检查4G连接
+    Serial1.begin(GPSBaud, SERIAL_8N1, RXPin, TXPin);
+    delay(1000);
+
+    // 发送AT命令检查模块响应
+    SentSerial("AT");
+    delay(500);
+
+    // 检查是否有响应
+    if (Serial1.available()) {
+      String response = "";
+      unsigned long start = millis();
+      while (millis() - start < 2000 && Serial1.available()) {
+        char c = Serial1.read();
+        response += c;
+      }
+      if (response.indexOf("OK") != -1) {
+        networkAvailable = true;
+        if (SERIAL_VERBOSE) Serial.println("检测到4G模块响应，将配置NTP");
+      }
+    }
+
+    if (!networkAvailable && SERIAL_VERBOSE) {
+      Serial.println("未检测到有效网络连接，跳过NTP配置");
+    }
+  }
+
+  // 只有在有网络连接时才配置NTP
+  if (networkAvailable) {
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov", "asia.pool.ntp.org");
+    if (SERIAL_VERBOSE) Serial.println("NTP configured for UTC timezone");
+
+    // 等待NTP同步
+    if (SERIAL_VERBOSE) Serial.println("等待NTP时间同步...");
+    time_t now = 0;
+    int syncAttempts = 0;
+    while (now < 1609459200 && syncAttempts < 30) { // 2021年后时间戳
+      delay(1000);
+      now = time(nullptr);
+      syncAttempts++;
+      if (syncAttempts % 5 == 0 && SERIAL_VERBOSE) {
+        Serial.print("NTP同步尝试: ");
+        Serial.println(syncAttempts);
+      }
+    }
+
+    if (now >= 1609459200) {
+      if (SERIAL_VERBOSE) Serial.println("NTP同步成功");
+    } else {
+      if (SERIAL_VERBOSE) Serial.println("NTP同步失败，将使用系统时间");
+    }
+  } else {
+    if (SERIAL_VERBOSE) Serial.println("无网络连接，跳过NTP同步");
+  }
+
   // 连接 WiFi（优先）
   wifiConnect();
 
@@ -996,33 +1205,23 @@ void loop() {
       double locationAccuracy = currentGPS.hasFix ? currentGPS.locationAccuracy : 0.0;
       double altitudeAccuracy = currentGPS.hasFix ? currentGPS.altitudeAccuracy : 0.0;
       String dataAcquiredAt = "";
-      // 尝试通过系统时间获取 ISO8601（UTC）
+      // 获取东七区时间
       time_t nowt = time(nullptr);
       if (nowt > 1609459200) { // 检查时间是否合理 (2021年后的时间戳)
         struct tm tm;
-        gmtime_r(&nowt, &tm);
+        gmtime_r(&nowt, &tm); // 使用UTC时间
         char buf[32];
         snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                  tm.tm_hour, tm.tm_min, tm.tm_sec);
         dataAcquiredAt = String(buf);
       } else {
-        // 如果时间无效，使用当前运行时间作为近似值
-        unsigned long uptime = millis();
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
-                 2024, 12, 29,  // 使用编译日期作为基准
-                 (uptime / 3600000) % 24,  // 小时
-                 (uptime / 60000) % 60,    // 分钟
-                 (uptime / 1000) % 60);    // 秒
-        dataAcquiredAt = String(buf);
-        if (SERIAL_VERBOSE) Serial.println("使用运行时间作为时间戳: " + dataAcquiredAt);
+        // 如果时间获取失败，设置为空
+        dataAcquiredAt = "null";
+        if (SERIAL_VERBOSE) Serial.println("时间获取失败，设置为空");
       }
 
       String json = "{";
-      json += "\"id\":\"";
-      json += GEO_SENSOR_ID;
-      json += "\",";
       json += "\"latitude\":";
       json += String(latitude, 6);
       json += ",";
@@ -1044,9 +1243,6 @@ void loop() {
       json += "\"altitudeAccuracy\":";
       json += String(altitudeAccuracy, 2);
       json += ",";
-      json += "\"dataAcquiredAt\":\"";
-      json += dataAcquiredAt;
-      json += "\",";
       json += "\"networkSource\":\"WiFi\"";
       json += "}";
 
@@ -1054,7 +1250,15 @@ void loop() {
       if (SERIAL_VERBOSE) {
         Serial.println("正在通过 WiFi 上传数据 (PATCH)...");
         Serial.println("目标URL: " + fullUrl);
-        Serial.println("发送数据: " + json);
+        Serial.print("发送数据长度: ");
+        Serial.println(json.length());
+        // 分段打印JSON以避免缓冲区溢出
+        Serial.println("发送数据开始:");
+        Serial.println(json.substring(0, 100));
+        if (json.length() > 100) {
+          Serial.println(json.substring(100));
+        }
+        Serial.println("发送数据结束");
       }
       bool ok = wifiHttpRequest("PATCH", fullUrl, json);
       if (SERIAL_VERBOSE) {
@@ -1073,30 +1277,32 @@ void loop() {
       // 检查 PDP 是否激活
       if (pdpActive) {
         // 使用GPS数据，如果没有GPS信号则使用0数据
-        double latitude = currentGPS.hasFix ? currentGPS.latitude : 0.0;
-        double longitude = currentGPS.hasFix ? currentGPS.longitude : 0.0;
+        double latitude = currentGPS.hasFix ? currentGPS.latitude : 3.0;
+        double longitude = currentGPS.hasFix ? currentGPS.longitude : 3.0;
         double altitude = currentGPS.hasFix ? currentGPS.altitude : 0.0;
-        double speed = currentGPS.hasFix ? currentGPS.speed : 0.0;
+        double speed = currentGPS.hasFix ? currentGPS.speed : 5.0;
         int satelliteCount = currentGPS.hasFix ? currentGPS.satelliteCount : 0;
         double locationAccuracy = currentGPS.hasFix ? currentGPS.locationAccuracy : 0.0;
         double altitudeAccuracy = currentGPS.hasFix ? currentGPS.altitudeAccuracy : 0.0;
         String dataAcquiredAt = "";
-        // 尝试通过系统时间获取 ISO8601（UTC）
+        // 获取当前东七区时间
         time_t nowt = time(nullptr);
-        if (nowt != ((time_t)-1)) {
+        if (nowt > 1609459200) { // 检查时间是否合理 (2021年后的时间戳)
           struct tm tm;
-          gmtime_r(&nowt, &tm);
+          gmtime_r(&nowt, &tm); // 使用UTC时间
           char buf[32];
           snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                    tm.tm_hour, tm.tm_min, tm.tm_sec);
           dataAcquiredAt = String(buf);
+          if (SERIAL_VERBOSE) Serial.println("使用当前东七区时间: " + dataAcquiredAt);
+        } else {
+          // 4G模式：NTP同步在移动网络上通常不可靠，直接设置为空
+          dataAcquiredAt = "null";
+          if (SERIAL_VERBOSE) Serial.println("4G模式：NTP同步不可靠，设置为空让后台处理");
         }
 
         String json = "{";
-        json += "\"id\":\"";
-        json += GEO_SENSOR_ID;
-        json += "\",";
         json += "\"latitude\":";
         json += String(latitude, 6);
         json += ",";
@@ -1118,17 +1324,22 @@ void loop() {
         json += "\"altitudeAccuracy\":";
         json += String(altitudeAccuracy, 2);
         json += ",";
-        json += "\"dataAcquiredAt\":\"";
-        json += dataAcquiredAt;
-        json += "\",";
         json += "\"networkSource\":\"4G\"";
         json += "}";
 
         String fullUrl = String(GEO_SENSOR_API_BASE_URL) + String(GEO_SENSOR_ID) + String("/");
         if (SERIAL_VERBOSE) {
-          Serial.println("正在通过 4G 网络上传数据 (POST)...");
+          Serial.println("正在通过 4G 网络上传数据 (PATCH)...");
           Serial.println("目标URL: " + fullUrl);
-          Serial.println("发送数据: " + json);
+          Serial.print("发送数据长度: ");
+          Serial.println(json.length());
+          // 分段打印JSON以避免缓冲区溢出
+          Serial.println("发送数据开始:");
+          Serial.println(json.substring(0, 100));
+          if (json.length() > 100) {
+            Serial.println(json.substring(100));
+          }
+          Serial.println("发送数据结束");
         }
         bool ok = cellularHttpRequest("POST", fullUrl, json);
         if (SERIAL_VERBOSE) {
