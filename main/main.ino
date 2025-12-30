@@ -1050,6 +1050,9 @@ void setup() {
   Serial.begin(115200);
   Serial1.begin(GPSBaud, SERIAL_8N1, RXPin, TXPin);
 
+  // 初始化随机数种子（使用ADC噪声）
+  randomSeed(analogRead(0));
+
   strip.begin();
   strip.show(); // 初始化关闭
 
@@ -1196,9 +1199,22 @@ void loop() {
   if (WiFi.status() == WL_CONNECTED) {
     if (now - lastUpload >= UPLOAD_INTERVAL) {
       lastUpload = now;
-      // 使用GPS数据，如果没有GPS信号则使用0数据
-      double latitude = currentGPS.hasFix ? currentGPS.latitude : 0.0;
-      double longitude = currentGPS.hasFix ? currentGPS.longitude : 0.0;
+      // 使用GPS数据，如果没有GPS信号则使用随机数（20-30范围）
+      double latitude, longitude;
+      if (currentGPS.hasFix) {
+        latitude = currentGPS.latitude;
+        longitude = currentGPS.longitude;
+      } else {
+        // 生成20-30范围内的随机数
+        latitude = 20.0 + (random(0, 1001) / 1000.0) * 10.0;  // 20.000 - 30.000
+        longitude = 20.0 + (random(0, 1001) / 1000.0) * 10.0; // 20.000 - 30.000
+        if (SERIAL_VERBOSE) {
+          Serial.print("GPS未定位，使用随机坐标: ");
+          Serial.print(latitude, 6);
+          Serial.print(", ");
+          Serial.println(longitude, 6);
+        }
+      }
       double altitude = currentGPS.hasFix ? currentGPS.altitude : 0.0;
       double speed = currentGPS.hasFix ? currentGPS.speed : 0.0;
       int satelliteCount = currentGPS.hasFix ? currentGPS.satelliteCount : 0;
@@ -1276,11 +1292,24 @@ void loop() {
       lastUpload = now;
       // 检查 PDP 是否激活
       if (pdpActive) {
-        // 使用GPS数据，如果没有GPS信号则使用0数据
-        double latitude = currentGPS.hasFix ? currentGPS.latitude : 3.0;
-        double longitude = currentGPS.hasFix ? currentGPS.longitude : 3.0;
+        // 使用GPS数据，如果没有GPS信号则使用随机数（20-30范围）
+        double latitude, longitude;
+        if (currentGPS.hasFix) {
+          latitude = currentGPS.latitude;
+          longitude = currentGPS.longitude;
+        } else {
+          // 生成20-30范围内的随机数
+          latitude = 20.0 + (random(0, 1001) / 1000.0) * 10.0;  // 20.000 - 30.000
+          longitude = 20.0 + (random(0, 1001) / 1000.0) * 10.0; // 20.000 - 30.000
+          if (SERIAL_VERBOSE) {
+            Serial.print("GPS未定位，使用随机坐标: ");
+            Serial.print(latitude, 6);
+            Serial.print(", ");
+            Serial.println(longitude, 6);
+          }
+        }
         double altitude = currentGPS.hasFix ? currentGPS.altitude : 0.0;
-        double speed = currentGPS.hasFix ? currentGPS.speed : 5.0;
+        double speed = currentGPS.hasFix ? currentGPS.speed : 8.0;
         int satelliteCount = currentGPS.hasFix ? currentGPS.satelliteCount : 0;
         double locationAccuracy = currentGPS.hasFix ? currentGPS.locationAccuracy : 0.0;
         double altitudeAccuracy = currentGPS.hasFix ? currentGPS.altitudeAccuracy : 0.0;
