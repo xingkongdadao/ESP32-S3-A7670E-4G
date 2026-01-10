@@ -38,8 +38,6 @@ struct GPSData {
 
 GPSData currentGPS;
 
-unsigned long lastPoll = 0;
-const unsigned long POLL_INTERVAL = 5000;
 
 unsigned long lastBlinkToggle = 0;
 const unsigned long BLINK_INTERVAL = 500;
@@ -572,122 +570,133 @@ String getLastResponse() {
 }
 
 // GPS数据解析函数
-bool parseGPSData(const String &response, GPSData &gps) {
-  // 解析SIMCom模块的GPS响应 (AT+CGNSINF格式)
-  // 格式: +CGNSINF: <GNSS run status>,<Fix status>,<UTC date & Time>,<Latitude>,<Longitude>,<MSL Altitude>,<Speed Over Ground>,<Course Over Ground>,<Fix Mode>,<Reserved1>,<HDOP>,<PDOP>,<VDOP>,<Reserved2>,<GNSS Satellites in View>,<GNSS Satellites Used>,<GLONASS Satellites Used>,<Reserved3>,<C/N0 max>,<HPA>,<VPA>
 
-  if (response.indexOf("+CGNSINF:") == -1) {
-    return false;
-  }
+// 解析AT+CGPSINFO格式的GPS数据
+// 格式: +CGPSINFO: <lat>,<N/S>,<lon>,<E/W>,<date>,<UTC time>,<alt>,<speed>,<course>
+bool parseCGPSINFOData(String response, GPSData &gps) {
+  int cgpsStart = response.indexOf("+CGPSINFO: ");
+  if (cgpsStart == -1) return false;
 
-  int startIdx = response.indexOf("+CGNSINF:") + 10;
-  String data = response.substring(startIdx);
+  String data = response.substring(cgpsStart + 11);
   data.trim();
 
-  // 分割逗号分隔的数据
-  int commaCount = 0;
-  int lastComma = -1;
-  String fields[20];
+  // 检查是否为空数据 (全为逗号或空值)
+  if (data.startsWith(",") || data.length() < 10) {
+    return false; // 没有GPS数据
+  }
 
-  for (int i = 0; i < data.length() && commaCount < 20; i++) {
+  // 分割逗号分隔的数据
+  String fields[10];
+  int fieldCount = 0;
+  int lastComma = -1;
+
+  for (int i = 0; i < data.length() && fieldCount < 10; i++) {
     if (data[i] == ',') {
-      fields[commaCount] = data.substring(lastComma + 1, i);
-      fields[commaCount].trim();
+      fields[fieldCount] = data.substring(lastComma + 1, i);
+      fields[fieldCount].trim();
       lastComma = i;
-      commaCount++;
+      fieldCount++;
     }
   }
 
-  if (commaCount >= 6) {
-    // fields[1] = Fix status (1=fix, 0=no fix)
-    gps.hasFix = (fields[1].toInt() == 1);
+  if (fieldCount >= 8) {
+    // 纬度 (fields[0]) - 格式: DDMM.MMMMM
+    if (fields[0].length() > 0) {
+      float latRaw = fields[0].toFloat();
+      int degrees = (int)(latRaw / 100);
+      float minutes = latRaw - (degrees * 100);
+      gps.latitude = degrees + (minutes / 60.0);
 
-    if (gps.hasFix) {
-      // fields[3] = Latitude
-      gps.latitude = fields[3].toDouble();
-      // fields[4] = Longitude
-      gps.longitude = fields[4].toDouble();
-      // fields[5] = MSL Altitude
-      gps.altitude = fields[5].toDouble();
-      // fields[6] = Speed Over Ground (km/h)
-      gps.speed = fields[6].toDouble();
-      // fields[14] = GNSS Satellites Used
-      gps.satelliteCount = fields[14].toInt();
-
-      // 计算定位精度（基于HDOP，如果可用）
-      if (commaCount >= 11 && fields[10].length() > 0) {
-        double hdop = fields[10].toDouble();
-        gps.locationAccuracy = hdop * 5.0; // 近似计算，HDOP * 5米
-      } else {
-        gps.locationAccuracy = 10.0; // 默认精度
+      // 南纬为负
+      if (fields[1] == "S") {
+        gps.latitude = -gps.latitude;
       }
-
-      gps.altitudeAccuracy = 10.0; // 默认海拔精度
-      gps.lastUpdate = millis();
-
-      if (SERIAL_VERBOSE) {
-        Serial.println("GPS定位成功:");
-        Serial.print("  纬度: "); Serial.println(gps.latitude, 6);
-        Serial.print("  经度: "); Serial.println(gps.longitude, 6);
-        Serial.print("  海拔: "); Serial.println(gps.altitude, 2);
-        Serial.print("  速度: "); Serial.println(gps.speed, 2);
-        Serial.print("  卫星: "); Serial.println(gps.satelliteCount);
-      }
-
-      return true;
-    } else {
-      if (SERIAL_VERBOSE) Serial.println("GPS未定位");
-      return false;
     }
+
+    // 经度 (fields[2]) - 格式: DDDMM.MMMMM
+    if (fields[2].length() > 0) {
+      float lonRaw = fields[2].toFloat();
+      int degrees = (int)(lonRaw / 100);
+      float minutes = lonRaw - (degrees * 100);
+      gps.longitude = degrees + (minutes / 60.0);
+
+      // 西经为负
+      if (fields[3] == "W") {
+        gps.longitude = -gps.longitude;
+      }
+    }
+
+    // 海拔 (fields[6])
+    if (fields[6].length() > 0) {
+      gps.altitude = fields[6].toFloat();
+    }
+
+    // 速度 (fields[7]) - km/h
+    if (fields[7].length() > 0) {
+      gps.speed = fields[7].toFloat();
+    }
+
+    // 设置其他GPS参数
+    gps.hasFix = true;
+    gps.satelliteCount = 4; // CGPSINFO不提供卫星数量，假设至少4颗
+    gps.locationAccuracy = 10.0; // GPS定位精度约10米
+    gps.altitudeAccuracy = 15.0;
+    gps.lastUpdate = millis();
+
+    if (SERIAL_VERBOSE) {
+      Serial.println("📍 CGPSINFO数据解析结果:");
+      Serial.print("   纬度: "); Serial.print(gps.latitude, 6); Serial.println(" °");
+      Serial.print("   经度: "); Serial.print(gps.longitude, 6); Serial.println(" °");
+      Serial.print("   海拔: "); Serial.print(gps.altitude, 2); Serial.println(" m");
+      Serial.print("   速度: "); Serial.print(gps.speed, 2); Serial.println(" km/h");
+      Serial.print("   卫星: "); Serial.print(gps.satelliteCount); Serial.println(" 颗");
+    }
+
+    return true;
   }
 
   return false;
 }
 
-// 获取GPS数据
+// 获取GPS数据 - 一直等待直到获取成功
 bool getGPSData() {
-  if (SERIAL_VERBOSE) Serial.println("获取GPS数据...");
+  if (SERIAL_VERBOSE) Serial.println("🛰️ 获取GPS数据...");
 
-  // 发送GPS信息查询命令
-  SentSerial("AT+CGNSINF");
-  delay(500); // 等待GPS响应
+  while (true) { // 一直循环直到获取到GPS数据
+    // 发送GPS信息查询命令 (使用AT+CGPSINFO，模块只支持这个命令)
+    SentSerial("AT+CGPSINFO");
+    delay(1000); // 等待GPS响应
 
-  // 读取响应
-  String response = "";
-  unsigned long start = millis();
-  bool gotResponse = false;
+    // 读取响应
+    String response = "";
+    unsigned long start = millis();
+    bool gotResponse = false;
 
-  while (millis() - start < 2000 && !gotResponse) {
-    if (Serial1.available()) {
-      char c = Serial1.read();
-      response += c;
+    while (millis() - start < 2000 && !gotResponse) {
+      if (Serial1.available()) {
+        char c = Serial1.read();
+        response += c;
 
-      if (response.indexOf("OK") != -1 || response.indexOf("ERROR") != -1) {
-        gotResponse = true;
+        if (response.indexOf("OK") != -1 || response.indexOf("ERROR") != -1) {
+          gotResponse = true;
+        }
       }
+      delay(10);
     }
-    delay(10);
-  }
 
-  if (SERIAL_VERBOSE) {
-    Serial.print("GPS响应: ");
-    Serial.println(response);
-  }
-
-  // 解析GPS数据
-  if (parseGPSData(response, currentGPS)) {
-    return true;
-  } else {
-    // 如果解析失败，保持上一次的数据或设置为0
-    if (millis() - currentGPS.lastUpdate > 300000) { // 5分钟超时
-      currentGPS.latitude = 0.0;
-      currentGPS.longitude = 0.0;
-      currentGPS.altitude = 0.0;
-      currentGPS.speed = 0.0;
-      currentGPS.satelliteCount = 0;
-      currentGPS.hasFix = false;
+    if (SERIAL_VERBOSE) {
+      Serial.print("GPS响应: ");
+      Serial.println(response);
     }
-    return false;
+
+    // 解析GPS数据 (使用CGPSINFO格式的解析函数)
+    if (parseCGPSINFOData(response, currentGPS)) {
+      if (SERIAL_VERBOSE) Serial.println("✅ GPS数据获取成功！");
+      return true;
+    } else {
+      if (SERIAL_VERBOSE) Serial.println("❌ GPS数据无效，等待卫星信号...");
+      delay(2000); // 等待2秒再试
+    }
   }
 }
 
@@ -695,34 +704,10 @@ bool getGPSData() {
 void initGPS() {
   if (SERIAL_VERBOSE) Serial.println("初始化GPS功能...");
 
-  // 检查GNSS功能是否支持
-  SentSerial("AT+CGNSSMOD?");
-  if (waitForResponse("OK", 3000)) {
-    if (SERIAL_VERBOSE) Serial.println("GNSS功能支持检查完成");
-  }
+  // 这个模块只支持AT+CGPSINFO，不支持其他GNSS命令
+  // 不需要额外的初始化，只在获取时直接查询GPS信息
 
-  // 开启GNSS电源
-  SentSerial("AT+CGNSPWR=1");
-  if (waitForResponse("OK", 3000)) {
-    if (SERIAL_VERBOSE) Serial.println("GNSS电源开启成功");
-  } else {
-    if (SERIAL_VERBOSE) Serial.println("GNSS电源开启失败，GPS功能可能不可用");
-    return;
-  }
-
-  // 设置GNSS模式为GPS + GLONASS（如果支持）
-  SentSerial("AT+CGNSMOD=1,1,0,0");
-  waitForResponse("OK", 3000);
-
-  // 开启NMEA数据输出
-  SentSerial("AT+CGNSURC=1");
-  waitForResponse("OK", 3000);
-
-  // 设置GNSS信息输出间隔（可选）
-  SentSerial("AT+CGNSINF=1");
-  waitForResponse("OK", 3000);
-
-  if (SERIAL_VERBOSE) Serial.println("GPS初始化完成");
+  if (SERIAL_VERBOSE) Serial.println("GPS初始化完成 (使用AT+CGPSINFO)");
 }
 
 void SentSerial(const char *p_char) {
@@ -1170,6 +1155,7 @@ void setup() {
 }
 
 void loop() {
+  // 处理串口数据
   if (Serial1.available()) {
     rev = Serial1.readString();
     if (SERIAL_VERBOSE) {
@@ -1179,24 +1165,212 @@ void loop() {
     parseModuleResponse(rev);
   }
 
-  unsigned long now = millis();
-  if (now - lastPoll >= POLL_INTERVAL) {
-    lastPoll = now;
-    if (SERIAL_VERBOSE) Serial.println("--- 状态轮询 ---");
-    SentSerial("AT+CPIN?");
-    SentSerial("AT+CGREG?");
+  // GPS数据获取和上传的主循环
+  static bool gpsAcquired = false;
+  static unsigned long uploadWaitStart = 0;
 
-    // 定期获取GPS数据
-    getGPSData();
+  if (!gpsAcquired) {
+    // 获取GPS数据（会一直等待直到成功）
+    gpsAcquired = getGPSData();
 
-    // 定期检查PDP状态（独立于LED显示）
-    checkPDPStatus();
+    if (gpsAcquired) {
+      if (SERIAL_VERBOSE) Serial.println("🎯 GPS定位成功，开始上传数据...");
+      uploadWaitStart = 0; // 重置上传等待时间
+    }
+  } else {
+    // GPS已获取，检查是否需要上传
+    unsigned long now = millis();
+
+    // 检查PDP状态（用于4G上传）
+    static unsigned long lastPdpCheck = 0;
+    if (now - lastPdpCheck >= 5000) { // 每5秒检查一次
+      lastPdpCheck = now;
+      checkPDPStatus();
+    }
+
+    // 执行数据上传
+    if (WiFi.status() == WL_CONNECTED) {
+      // WiFi上传逻辑
+      unsigned long now = millis();
+      if (now - lastUpload >= UPLOAD_INTERVAL) {
+        lastUpload = now;
+        // 使用GPS数据
+        double latitude = currentGPS.latitude;
+        double longitude = currentGPS.longitude;
+        double altitude = currentGPS.altitude;
+        double speed = currentGPS.speed;
+        int satelliteCount = currentGPS.satelliteCount;
+        double locationAccuracy = currentGPS.locationAccuracy;
+        double altitudeAccuracy = currentGPS.altitudeAccuracy;
+        String dataAcquiredAt = "";
+        // 获取东七区时间
+        time_t nowt = time(nullptr);
+        if (nowt > 1609459200) { // 检查时间是否合理 (2021年后的时间戳)
+          struct tm tm;
+          gmtime_r(&nowt, &tm); // 使用UTC时间
+          char buf[32];
+          snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                   tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                   tm.tm_hour, tm.tm_min, tm.tm_sec);
+          dataAcquiredAt = String(buf);
+        } else {
+          // 如果时间获取失败，设置为空
+          dataAcquiredAt = "null";
+          if (SERIAL_VERBOSE) Serial.println("时间获取失败，设置为空");
+        }
+
+        String json = "{";
+        json += "\"latitude\":";
+        json += String(latitude, 6);
+        json += ",";
+        json += "\"longitude\":";
+        json += String(longitude, 6);
+        json += ",";
+        json += "\"altitude\":";
+        json += String(altitude, 2);
+        json += ",";
+        json += "\"speed\":";
+        json += String(speed, 2);
+        json += ",";
+        json += "\"satelliteCount\":";
+        json += String(satelliteCount);
+        json += ",";
+        json += "\"locationAccuracy\":";
+        json += String(locationAccuracy, 2);
+        json += ",";
+        json += "\"altitudeAccuracy\":";
+        json += String(altitudeAccuracy, 2);
+        json += ",";
+        json += "\"networkSource\":\"WiFi\"";
+        json += "}";
+
+        String fullUrl = String(GEO_SENSOR_API_BASE_URL) + String(GEO_SENSOR_ID) + String("/");
+        if (SERIAL_VERBOSE) {
+          Serial.println("正在通过 WiFi 上传数据 (PATCH)...");
+          Serial.println("目标URL: " + fullUrl);
+          Serial.print("发送数据长度: ");
+          Serial.println(json.length());
+          // 分段打印JSON以避免缓冲区溢出
+          Serial.println("发送数据开始:");
+          Serial.println(json.substring(0, 100));
+          if (json.length() > 100) {
+            Serial.println(json.substring(100));
+          }
+          Serial.println("发送数据结束");
+        }
+        bool ok = wifiHttpRequest("PATCH", fullUrl, json);
+        if (SERIAL_VERBOSE) {
+        Serial.print("WiFi upload result: ");
+        Serial.println(ok ? "OK" : "FAILED");
+        }
+        // 上传成功时闪烁提示
+        if (ok) {
+          flashSuccess();
+          // 上传成功后，等待10秒再获取新的GPS数据
+          uploadWaitStart = millis();
+        }
+      }
+    } else {
+      // WiFi 不可用，尝试使用 4G 网络上传
+      unsigned long now = millis();
+      if (now - lastUpload >= UPLOAD_INTERVAL) {
+        lastUpload = now;
+        // 检查 PDP 是否激活
+        if (pdpActive) {
+          // 使用GPS数据
+          double latitude = currentGPS.latitude;
+          double longitude = currentGPS.longitude;
+          double altitude = currentGPS.altitude;
+          double speed = currentGPS.speed;
+          int satelliteCount = currentGPS.satelliteCount;
+          double locationAccuracy = currentGPS.locationAccuracy;
+          double altitudeAccuracy = currentGPS.altitudeAccuracy;
+          String dataAcquiredAt = "";
+          // 获取当前东七区时间
+          time_t nowt = time(nullptr);
+          if (nowt > 1609459200) { // 检查时间是否合理 (2021年后的时间戳)
+            struct tm tm;
+            gmtime_r(&nowt, &tm); // 使用UTC时间
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                     tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                     tm.tm_hour, tm.tm_min, tm.tm_sec);
+            dataAcquiredAt = String(buf);
+          } else {
+            // 4G模式：NTP同步在移动网络上通常不可靠，直接设置为空
+            dataAcquiredAt = "null";
+            if (SERIAL_VERBOSE) Serial.println("4G模式：NTP同步不可靠，设置为空让后台处理");
+          }
+
+          String json = "{";
+          json += "\"latitude\":";
+          json += String(latitude, 6);
+          json += ",";
+          json += "\"longitude\":";
+          json += String(longitude, 6);
+          json += ",";
+          json += "\"altitude\":";
+          json += String(altitude, 2);
+          json += ",";
+          json += "\"speed\":";
+          json += String(speed, 2);
+          json += ",";
+          json += "\"satelliteCount\":";
+          json += String(satelliteCount);
+          json += ",";
+          json += "\"locationAccuracy\":";
+          json += String(locationAccuracy, 2);
+          json += ",";
+          json += "\"altitudeAccuracy\":";
+          json += String(altitudeAccuracy, 2);
+          json += ",";
+          json += "\"networkSource\":\"4G\"";
+          json += "}";
+
+          String fullUrl = String(GEO_SENSOR_API_BASE_URL) + String(GEO_SENSOR_ID) + String("/");
+          if (SERIAL_VERBOSE) {
+            Serial.println("正在通过 4G 网络上传数据 (PATCH)...");
+            Serial.println("目标URL: " + fullUrl);
+            Serial.print("发送数据长度: ");
+            Serial.println(json.length());
+            // 分段打印JSON以避免缓冲区溢出
+            Serial.println("发送数据开始:");
+            Serial.println(json.substring(0, 100));
+            if (json.length() > 100) {
+              Serial.println(json.substring(100));
+            }
+            Serial.println("发送数据结束");
+          }
+          bool ok = cellularHttpRequest("POST", fullUrl, json);
+          if (SERIAL_VERBOSE) {
+            Serial.print("4G upload result: ");
+            Serial.println(ok ? "OK" : "FAILED");
+          }
+          // 上传成功时闪烁提示
+          if (ok) {
+            flashSuccess();
+            // 上传成功后，等待10秒再获取新的GPS数据
+            uploadWaitStart = millis();
+          }
+        } else {
+          if (SERIAL_VERBOSE) Serial.println("4G网络未激活，跳过数据上传");
+        }
+      }
+    }
+
+    // 检查是否已经等待了10秒
+    if (uploadWaitStart > 0 && now - uploadWaitStart >= 10000) { // 10秒
+      if (SERIAL_VERBOSE) Serial.println("⏰ 上传后等待10秒完成，开始获取新的GPS数据...");
+      gpsAcquired = false; // 重置GPS状态，开始新的循环
+      uploadWaitStart = 0;
+    }
   }
 
   updateLEDState();
  
   // 优先通过 WiFi 上传
   if (WiFi.status() == WL_CONNECTED) {
+    unsigned long now = millis();
     if (now - lastUpload >= UPLOAD_INTERVAL) {
       lastUpload = now;
       // 使用GPS数据，如果没有GPS信号则使用随机数（20-30范围）
@@ -1288,6 +1462,7 @@ void loop() {
     }
   } else {
     // WiFi 不可用，尝试使用 4G 网络上传
+    unsigned long now = millis();
     if (now - lastUpload >= UPLOAD_INTERVAL) {
       lastUpload = now;
       // 检查 PDP 是否激活
