@@ -33,10 +33,13 @@ struct GPSData {
   double locationAccuracy = 0.0;
   double altitudeAccuracy = 0.0;
   bool hasFix = false;  // 是否有GPS定位
+  String locationSource = "GPS"; // 定位来源: GPS 或 LBS
   unsigned long lastUpdate = 0;
 };
 
 GPSData currentGPS;
+
+bool gpsInitialized = false; // GPS是否成功初始化
 
 
 unsigned long lastBlinkToggle = 0;
@@ -571,6 +574,97 @@ String getLastResponse() {
 
 // GPS数据解析函数
 
+// 解析AT+CGNSINF格式的GPS数据
+// 格式: +CGNSINF: <GNSS run status>,<Fix status>,<UTC date & Time>,<Latitude>,<Longitude>,<Altitude>,<Speed>,<Course>,<Fix Mode>,<Reserved1>,<HDOP>,<PDOP>,<VDOP>,<Reserved2>,<GNSS Satellites in View>,<GNSS Satellites Used>,<GLONASS Satellites Used>,<Reserved3>,<C/N0 max>,<HPA>,<VPA>
+bool parseCGNSINFData(String response, GPSData &gps) {
+  int cgnsStart = response.indexOf("+CGNSINF: ");
+  if (cgnsStart == -1) return false;
+
+  String data = response.substring(cgnsStart + 10);
+  data.trim();
+
+  // 检查是否为空数据或无效数据
+  if (data.startsWith(",") || data.length() < 10) {
+    return false; // 没有GPS数据
+  }
+
+  // 分割逗号分隔的数据
+  String fields[20];
+  int fieldCount = 0;
+  int lastComma = -1;
+
+  for (int i = 0; i < data.length() && fieldCount < 20; i++) {
+    if (data[i] == ',') {
+      fields[fieldCount] = data.substring(lastComma + 1, i);
+      fields[fieldCount].trim();
+      lastComma = i;
+      fieldCount++;
+    }
+  }
+
+  // 获取最后一个字段
+  if (fieldCount < 19) {
+    fields[fieldCount] = data.substring(lastComma + 1);
+    fields[fieldCount].trim();
+    fieldCount++;
+  }
+
+  if (fieldCount >= 6) {
+    // 检查定位状态 (fields[1]) - 1表示已定位
+    if (fields[1].toInt() != 1) {
+      return false; // 未定位
+    }
+
+    // 纬度 (fields[3])
+    if (fields[3].length() > 0) {
+      gps.latitude = fields[3].toFloat();
+    }
+
+    // 经度 (fields[4])
+    if (fields[4].length() > 0) {
+      gps.longitude = fields[4].toFloat();
+    }
+
+    // 海拔 (fields[5])
+    if (fields[5].length() > 0) {
+      gps.altitude = fields[5].toFloat();
+    }
+
+    // 速度 (fields[6]) - 单位通常是km/h或节，假设是km/h
+    if (fields[6].length() > 0) {
+      gps.speed = fields[6].toFloat();
+    }
+
+    // 卫星数量 (fields[14] + fields[15] 或其他字段)
+    // CGNSINF通常在后面字段包含卫星信息
+    if (fieldCount >= 15 && fields[14].length() > 0) {
+      gps.satelliteCount = fields[14].toInt();
+    } else {
+      gps.satelliteCount = 4; // 默认值
+    }
+
+    // 设置其他GPS参数
+    gps.hasFix = true;
+    gps.locationAccuracy = 5.0; // CGNSINF通常有更好的精度
+    gps.altitudeAccuracy = 10.0;
+    gps.locationSource = "GPS"; // 标识为GPS定位
+    gps.lastUpdate = millis();
+
+    if (SERIAL_VERBOSE) {
+      Serial.println("📍 CGNSINF数据解析结果:");
+      Serial.print("   纬度: "); Serial.print(gps.latitude, 6); Serial.println(" °");
+      Serial.print("   经度: "); Serial.print(gps.longitude, 6); Serial.println(" °");
+      Serial.print("   海拔: "); Serial.print(gps.altitude, 2); Serial.println(" m");
+      Serial.print("   速度: "); Serial.print(gps.speed, 2); Serial.println(" km/h");
+      Serial.print("   卫星: "); Serial.print(gps.satelliteCount); Serial.println(" 颗");
+    }
+
+    return true;
+  }
+
+  return false;
+}
+
 // 解析AT+CGPSINFO格式的GPS数据
 // 格式: +CGPSINFO: <lat>,<N/S>,<lon>,<E/W>,<date>,<UTC time>,<alt>,<speed>,<course>
 bool parseCGPSINFOData(String response, GPSData &gps) {
@@ -641,6 +735,7 @@ bool parseCGPSINFOData(String response, GPSData &gps) {
     gps.satelliteCount = 4; // CGPSINFO不提供卫星数量，假设至少4颗
     gps.locationAccuracy = 10.0; // GPS定位精度约10米
     gps.altitudeAccuracy = 15.0;
+    gps.locationSource = "GPS"; // 标识为GPS定位
     gps.lastUpdate = millis();
 
     if (SERIAL_VERBOSE) {
@@ -662,52 +757,79 @@ bool parseCGPSINFOData(String response, GPSData &gps) {
 bool getGPSData() {
   if (SERIAL_VERBOSE) Serial.println("🛰️ 获取GPS数据...");
 
-  while (true) { // 一直循环直到获取到GPS数据
-    // 发送GPS信息查询命令 (使用AT+CGPSINFO，模块只支持这个命令)
-    SentSerial("AT+CGPSINFO");
-    delay(1000); // 等待GPS响应
+  // 发送GPS信息查询命令 (使用AT+CGPSINFO)
+  SentSerial("AT+CGPSINFO");
+  delay(1000); // 等待GPS响应
 
-    // 读取响应
-    String response = "";
-    unsigned long start = millis();
-    bool gotResponse = false;
+  // 读取响应
+  String response = "";
+  unsigned long start = millis();
+  bool gotResponse = false;
 
-    while (millis() - start < 2000 && !gotResponse) {
-      if (Serial1.available()) {
-        char c = Serial1.read();
-        response += c;
+  while (millis() - start < 2000 && !gotResponse) {
+    if (Serial1.available()) {
+      char c = Serial1.read();
+      response += c;
 
-        if (response.indexOf("OK") != -1 || response.indexOf("ERROR") != -1) {
-          gotResponse = true;
-        }
+      if (response.indexOf("OK") != -1 || response.indexOf("ERROR") != -1) {
+        gotResponse = true;
       }
-      delay(10);
     }
+    delay(10);
+  }
 
-    if (SERIAL_VERBOSE) {
-      Serial.print("GPS响应: ");
-      Serial.println(response);
-    }
+  if (SERIAL_VERBOSE) {
+    Serial.print("GPS响应: ");
+    Serial.println(response);
+  }
 
-    // 解析GPS数据 (使用CGPSINFO格式的解析函数)
-    if (parseCGPSINFOData(response, currentGPS)) {
-      if (SERIAL_VERBOSE) Serial.println("✅ GPS数据获取成功！");
-      return true;
-    } else {
-      if (SERIAL_VERBOSE) Serial.println("❌ GPS数据无效，等待卫星信号...");
-      delay(2000); // 等待2秒再试
-    }
+  // 解析GPS数据 (使用CGPSINFO格式)
+  if (parseCGPSINFOData(response, currentGPS)) {
+    if (SERIAL_VERBOSE) Serial.println("✅ GPS数据获取成功！");
+    return true;
+  } else {
+    if (SERIAL_VERBOSE) Serial.println("❌ GPS数据无效，等待卫星信号...");
+    return false; // 不阻塞，返回失败，让主循环继续
   }
 }
 
-// 初始化GPS功能
-void initGPS() {
-  if (SERIAL_VERBOSE) Serial.println("初始化GPS功能...");
+// 初始化GPS功能 - 使用GNSS命令序列
+bool initGPS() {
+  // 第一步：开启GNSS电源
+  if (SERIAL_VERBOSE) Serial.println("开启GNSS电源...");
+  SentSerial("AT+CGNSSPWR=1");
 
-  // 这个模块只支持AT+CGPSINFO，不支持其他GNSS命令
-  // 不需要额外的初始化，只在获取时直接查询GPS信息
+  // 等待GNSS电源启动响应
+  if (!waitForResponse("OK", 3000)) {
+    if (SERIAL_VERBOSE) Serial.println("GNSS电源启动失败，将在主循环中继续重试");
+    return false;
+  }
 
-  if (SERIAL_VERBOSE) Serial.println("GPS初始化完成 (使用AT+CGPSINFO)");
+  if (SERIAL_VERBOSE) Serial.println("GNSS电源启动成功");
+
+  // 第二步：等待GNSS芯片启动
+  if (SERIAL_VERBOSE) Serial.println("等待GNSS芯片启动 (10秒)...");
+  delay(10000);
+
+  // 第三步：开启GNSS数据输出
+  if (SERIAL_VERBOSE) Serial.println("开启GNSS数据输出...");
+  SentSerial("AT+CGNSSTST=1");
+
+  // 等待GNSS数据输出启动响应
+  if (!waitForResponse("OK", 3000)) {
+    if (SERIAL_VERBOSE) Serial.println("GNSS数据输出启动失败，将在主循环中继续重试");
+    return false;
+  }
+
+  if (SERIAL_VERBOSE) Serial.println("GNSS数据输出启动成功");
+
+  // GNSS初始化完成后，等待30秒让卫星信号稳定
+  if (SERIAL_VERBOSE) Serial.println("GNSS初始化完成，等待30秒让卫星信号稳定...");
+  delay(30000);
+
+  if (SERIAL_VERBOSE) Serial.println("卫星信号稳定完成，准备获取经纬度数据");
+
+  return true; // GNSS启动成功
 }
 
 void SentSerial(const char *p_char) {
@@ -1147,7 +1269,7 @@ void setup() {
   if (SERIAL_VERBOSE) {
     Serial.println("\n=== 初始化GPS功能 ===");
   }
-  initGPS();
+  gpsInitialized = initGPS();
 
   if (SERIAL_VERBOSE) {
     Serial.println("=== 初始化完成 ===\n");
@@ -1169,13 +1291,35 @@ void loop() {
   static bool gpsAcquired = false;
   static unsigned long uploadWaitStart = 0;
 
-  if (!gpsAcquired) {
-    // 获取GPS数据（会一直等待直到成功）
-    gpsAcquired = getGPSData();
+  // 检查GPS初始化状态
+  if (!gpsInitialized) {
+    // GPS未初始化成功，尝试重新初始化
+    static unsigned long lastGpsRetry = 0;
+    if (millis() - lastGpsRetry > 5000) { // 每5秒尝试一次GPS初始化
+      lastGpsRetry = millis();
+      if (SERIAL_VERBOSE) Serial.println("尝试重新初始化GPS...");
+      gpsInitialized = initGPS();
+    }
 
-    if (gpsAcquired) {
-      if (SERIAL_VERBOSE) Serial.println("🎯 GPS定位成功，开始上传数据...");
-      uploadWaitStart = 0; // 重置上传等待时间
+    // 显示跳过GPS数据获取的提示
+    if (SERIAL_VERBOSE) {
+      static unsigned long lastGpsSkipMsg = 0;
+      if (millis() - lastGpsSkipMsg > 10000) { // 每10秒显示一次
+        Serial.println("GPS未初始化成功，跳过GPS数据获取");
+        lastGpsSkipMsg = millis();
+      }
+    }
+  } else if (!gpsAcquired) {
+    // GPS已初始化，定期尝试获取GPS数据
+    static unsigned long lastGpsAttempt = 0;
+    if (millis() - lastGpsAttempt > 5000) { // 每5秒尝试一次
+      lastGpsAttempt = millis();
+      gpsAcquired = getGPSData();
+
+      if (gpsAcquired) {
+        if (SERIAL_VERBOSE) Serial.println("🎯 GPS定位成功，开始上传数据...");
+        uploadWaitStart = 0; // 重置上传等待时间
+      }
     }
   } else {
     // GPS已获取，检查是否需要上传
