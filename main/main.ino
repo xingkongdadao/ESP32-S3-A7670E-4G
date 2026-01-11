@@ -35,6 +35,7 @@ struct GPSData {
   bool hasFix = false;  // 是否有GPS定位
   String locationSource = "GPS"; // 定位来源: GPS 或 LBS
   unsigned long lastUpdate = 0;
+  String ipAddress = "";  // IP地址
 };
 
 GPSData currentGPS;
@@ -569,6 +570,72 @@ String getLastResponse() {
   }
 
   return response;
+}
+
+// 获取当前IP地址
+String getCurrentIPAddress() {
+  Serial.println("📡 获取当前IP地址...");
+
+  SentSerial("AT+CGPADDR");
+  delay(500);
+
+  unsigned long tstart = millis();
+  String resp = "";
+  int responseTimeout = 3000;
+
+  // 等待完整响应
+  while (millis() - tstart < responseTimeout) {
+    if (Serial1.available()) {
+      char c = Serial1.read();
+      resp += c;
+      tstart = millis();
+    }
+
+    if (resp.indexOf("OK") != -1 || resp.indexOf("ERROR") != -1) {
+      delay(200);
+      while (Serial1.available()) {
+        resp += (char)Serial1.read();
+      }
+      break;
+    }
+
+    delay(10);
+  }
+
+  String ipAddress = "";
+
+  if (resp.indexOf("+CGPADDR: 1,") != -1) {
+    int ipStart = resp.indexOf("+CGPADDR: 1,") + 12;
+    int ipEnd = resp.indexOf("\r\n", ipStart);
+    if (ipEnd == -1) ipEnd = resp.indexOf("\n", ipStart);
+    if (ipEnd == -1) ipEnd = resp.indexOf("OK", ipStart);
+    if (ipEnd == -1) ipEnd = resp.length();
+
+    ipAddress = resp.substring(ipStart, ipEnd);
+    ipAddress.trim();
+
+    // 验证IP地址格式
+    int dotCount = 0;
+    bool validIP = true;
+    for (char c : ipAddress) {
+      if (c == '.') dotCount++;
+      else if (!isDigit(c)) {
+        validIP = false;
+        break;
+      }
+    }
+
+    if (!validIP || dotCount != 3 || ipAddress == "0.0.0.0" || ipAddress.length() < 7) {
+      ipAddress = "";
+    }
+  }
+
+  if (SERIAL_VERBOSE) {
+    Serial.print("当前IP地址: ");
+    Serial.println(ipAddress.length() > 0 ? ipAddress : "未获取到");
+  }
+
+  return ipAddress;
 }
 
 // GPS数据解析函数
@@ -1398,6 +1465,9 @@ void loop() {
           if (SERIAL_VERBOSE) Serial.println("时间获取失败，设置为空");
         }
 
+        // 获取当前IP地址
+        String currentIP = getCurrentIPAddress();
+
         String json = "{";
         json += "\"latitude\":";
         json += String(latitude, 6);
@@ -1420,7 +1490,10 @@ void loop() {
         json += "\"altitudeAccuracy\":";
         json += String(altitudeAccuracy, 2);
         json += ",";
-        json += "\"networkSource\":\"WiFi\"";
+        json += "\"networkSource\":\"WiFi\",";
+        json += "\"ipAddress\":\"";
+        json += currentIP;
+        json += "\"";
         json += "}";
 
         String fullUrl = String(GEO_SENSOR_API_BASE_URL);
@@ -1481,6 +1554,9 @@ void loop() {
             if (SERIAL_VERBOSE) Serial.println("4G模式：NTP同步不可靠，设置为空让后台处理");
           }
 
+          // 获取当前IP地址
+          String currentIP = getCurrentIPAddress();
+
           String json = "{";
           json += "\"latitude\":";
           json += String(latitude, 6);
@@ -1503,7 +1579,10 @@ void loop() {
           json += "\"altitudeAccuracy\":";
           json += String(altitudeAccuracy, 2);
           json += ",";
-          json += "\"networkSource\":\"4G\"";
+          json += "\"networkSource\":\"4G\",";
+          json += "\"ipAddress\":\"";
+          json += currentIP;
+          json += "\"";
           json += "}";
 
           String fullUrl = String(GEO_SENSOR_API_BASE_URL);
@@ -1590,6 +1669,9 @@ void loop() {
         if (SERIAL_VERBOSE) Serial.println("时间获取失败，设置为空");
       }
 
+      // 获取当前IP地址
+      String currentIP = getCurrentIPAddress();
+
       String json = "{";
       json += "\"latitude\":";
       json += String(latitude, 6);
@@ -1612,7 +1694,10 @@ void loop() {
       json += "\"altitudeAccuracy\":";
       json += String(altitudeAccuracy, 2);
       json += ",";
-      json += "\"networkSource\":\"WiFi\"";
+      json += "\"networkSource\":\"WiFi\",";
+      json += "\"ipAddress\":\"";
+      json += currentIP;
+      json += "\"";
       json += "}";
 
       String fullUrl = String(GEO_SENSOR_API_BASE_URL);
@@ -1685,6 +1770,9 @@ void loop() {
           if (SERIAL_VERBOSE) Serial.println("4G模式：NTP同步不可靠，设置为空让后台处理");
         }
 
+        // 获取当前IP地址
+        String currentIP = getCurrentIPAddress();
+
         String json = "{";
         json += "\"latitude\":";
         json += String(latitude, 6);
@@ -1707,7 +1795,10 @@ void loop() {
         json += "\"altitudeAccuracy\":";
         json += String(altitudeAccuracy, 2);
         json += ",";
-        json += "\"networkSource\":\"4G\"";
+        json += "\"networkSource\":\"4G\",";
+        json += "\"ipAddress\":\"";
+        json += currentIP;
+        json += "\"";
         json += "}";
 
         String fullUrl = String(GEO_SENSOR_API_BASE_URL);

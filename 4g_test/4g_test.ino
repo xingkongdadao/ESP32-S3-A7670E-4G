@@ -18,6 +18,42 @@ bool simPresent = false;
 bool networkRegistered = false;
 bool pdpActive = false;  // 全局PDP状态变量
 
+// 数据收集结构体
+struct SensorData {
+  // GPS数据
+  double latitude = 0.0;
+  double longitude = 0.0;
+  double altitude = 0.0;
+  double speed = 0.0;
+  int satelliteCount = 0;
+  double locationAccuracy = 0.0;
+  double altitudeAccuracy = 0.0;
+  String locationSource = "GPS";
+
+  // 网络信息
+  int signalStrength = 0;
+  String operatorName = "";
+  String networkType = "";
+  String imsi = "";
+  String imei = "";
+  String iccid = "";
+  int networkRegistration = 0;
+  String ipAddress = "";  // IP地址字段
+
+  // 设备状态
+  float temperature = 0.0;
+  float voltage = 0.0;
+  int batteryLevel = 0;
+  String firmwareVersion = "";
+  unsigned long uptime = 0;
+
+  // 时间戳
+  String timestamp = "";
+};
+
+// 全局传感器数据实例
+SensorData sensorData;
+
 // 后台 API 配置
 static const char GEO_SENSOR_API_BASE_URL[] = "https://manage.gogotrans.com/api/microcontrollerInstanceDevice/";
 static const char GEO_SENSOR_KEY[] = "mcu_5e3abda8585e4bc79af89ad57af8b3b9";
@@ -444,6 +480,72 @@ void parseModuleResponse(const String &response) {
   }
 }
 
+// 获取当前IP地址
+String getCurrentIPAddress() {
+  Serial.println("📡 获取当前IP地址...");
+
+  SentSerial("AT+CGPADDR");
+  delay(500);
+
+  unsigned long tstart = millis();
+  String resp = "";
+  int responseTimeout = 3000;
+
+  // 等待完整响应
+  while (millis() - tstart < responseTimeout) {
+    if (Serial1.available()) {
+      char c = Serial1.read();
+      resp += c;
+      tstart = millis();
+    }
+
+    if (resp.indexOf("OK") != -1 || resp.indexOf("ERROR") != -1) {
+      delay(200);
+      while (Serial1.available()) {
+        resp += (char)Serial1.read();
+      }
+      break;
+    }
+
+    delay(10);
+  }
+
+  String ipAddress = "";
+
+  if (resp.indexOf("+CGPADDR: 1,") != -1) {
+    int ipStart = resp.indexOf("+CGPADDR: 1,") + 12;
+    int ipEnd = resp.indexOf("\r\n", ipStart);
+    if (ipEnd == -1) ipEnd = resp.indexOf("\n", ipStart);
+    if (ipEnd == -1) ipEnd = resp.indexOf("OK", ipStart);
+    if (ipEnd == -1) ipEnd = resp.length();
+
+    ipAddress = resp.substring(ipStart, ipEnd);
+    ipAddress.trim();
+
+    // 验证IP地址格式
+    int dotCount = 0;
+    bool validIP = true;
+    for (char c : ipAddress) {
+      if (c == '.') dotCount++;
+      else if (!isDigit(c)) {
+        validIP = false;
+        break;
+      }
+    }
+
+    if (!validIP || dotCount != 3 || ipAddress == "0.0.0.0" || ipAddress.length() < 7) {
+      ipAddress = "";
+    }
+  }
+
+  if (SERIAL_VERBOSE) {
+    Serial.print("当前IP地址: ");
+    Serial.println(ipAddress.length() > 0 ? ipAddress : "未获取到");
+  }
+
+  return ipAddress;
+}
+
 // 检查PDP状态（独立于LED显示）
 void checkPDPStatus() {
   static unsigned long lastPdpCheck = 0;
@@ -486,6 +588,7 @@ void checkPDPStatus() {
 
     // 解析响应，查找IP地址
     bool pdpActive = false;
+    String currentIP = "";
 
     if (SERIAL_VERBOSE) {
       Serial.print("原始响应: '");
@@ -501,24 +604,24 @@ void checkPDPStatus() {
       if (ipEnd == -1) ipEnd = resp.indexOf("OK", ipStart);
       if (ipEnd == -1) ipEnd = resp.length();
 
-      String ipAddr = resp.substring(ipStart, ipEnd);
-      ipAddr.trim();
+      currentIP = resp.substring(ipStart, ipEnd);
+      currentIP.trim();
 
       if (SERIAL_VERBOSE) {
         Serial.print("提取的IP地址: '");
-        Serial.print(ipAddr);
+        Serial.print(currentIP);
         Serial.println("'");
       }
 
       // 检查IP地址是否有效（排除0.0.0.0和无效地址）
       // IPv4地址应该有3个点号，格式为x.x.x.x
       int dotCount = 0;
-      for (char c : ipAddr) {
+      for (char c : currentIP) {
         if (c == '.') dotCount++;
       }
 
-      pdpActive = (ipAddr.length() >= 7 &&  // 最小IP长度 x.x.x.x
-                   ipAddr != "0.0.0.0" &&
+      pdpActive = (currentIP.length() >= 7 &&  // 最小IP长度 x.x.x.x
+                   currentIP != "0.0.0.0" &&
                    dotCount == 3); // IPv4地址应该有3个点号
 
       if (SERIAL_VERBOSE) {
@@ -533,6 +636,13 @@ void checkPDPStatus() {
       }
     }
 
+    // 更新全局sensorData中的IP地址
+    if (pdpActive && currentIP.length() > 0) {
+      sensorData.ipAddress = currentIP;
+    } else {
+      sensorData.ipAddress = "";
+    }
+
     lastPdpStatus = pdpActive;
 
     if (SERIAL_VERBOSE) {
@@ -542,6 +652,7 @@ void checkPDPStatus() {
       Serial.println(pdpActive ? "激活 ✓" : "未激活 ✗");
       if (pdpActive) {
         Serial.println("✓✓✓ 4G网络连接正常 ✓✓✓");
+        Serial.println("📡 当前IP地址: " + sensorData.ipAddress);
       } else {
         Serial.println("⚠️⚠️⚠️ 4G网络连接异常 ⚠️⚠️⚠️");
       }
@@ -773,6 +884,12 @@ void configureAPNAndActivatePDP() {
 void test4GUpload() {
   Serial.println("\n=== 开始4G网络数据上传测试 ===");
 
+  // 获取当前IP地址
+  String currentIP = getCurrentIPAddress();
+  if (currentIP.length() == 0) {
+    Serial.println("⚠️ 未获取到IP地址，使用空字符串");
+  }
+
   // 创建测试GPS数据（模拟定位数据）
   double latitude = 39.904200;      // 北京的纬度
   double longitude = 116.407396;    // 北京的经度
@@ -798,7 +915,7 @@ void test4GUpload() {
     dataAcquiredAt = "null";
   }
 
-  // 构建与main.ino相同的JSON格式
+  // 构建与main.ino相同的JSON格式，添加ipAddress字段
   String json = "{";
   json += "\"latitude\":";
   json += String(latitude, 6);
@@ -821,7 +938,10 @@ void test4GUpload() {
   json += "\"altitudeAccuracy\":";
   json += String(altitudeAccuracy, 2);
   json += ",";
-  json += "\"networkSource\":\"4G\"";
+  json += "\"networkSource\":\"4G\",";
+  json += "\"ipAddress\":\"";
+  json += currentIP;
+  json += "\"";
   json += "}";
 
   String fullUrl = String(GEO_SENSOR_API_BASE_URL);
@@ -1169,6 +1289,22 @@ String readSerialData() {
   return data;
 }
 
+// 打印网络信息摘要（包含IP地址）
+void printNetworkSummary() {
+  Serial.println("\n📡 网络连接摘要:");
+
+  // 获取当前IP地址
+  String currentIP = getCurrentIPAddress();
+
+  Serial.println("   PDP状态: " + String(pdpActive ? "已激活 ✓" : "未激活 ✗"));
+  Serial.println("   IP地址: " + (currentIP.length() > 0 ? currentIP : "未获取"));
+  Serial.println("   SIM卡状态: " + String(simPresent ? "正常 ✓" : "异常 ✗"));
+  Serial.println("   网络注册: " + String(networkRegistered ? "已注册 ✓" : "未注册 ✗"));
+
+  // 更新sensorData中的IP地址
+  sensorData.ipAddress = currentIP;
+}
+
 void setup() {
   Serial.begin(115200);
   Serial1.begin(GPSBaud, SERIAL_8N1, RXPin, TXPin);
@@ -1273,13 +1409,17 @@ void setup() {
   Serial.println("5. 执行SIM卡兼容性诊断...");
   diagnoseSIMCompatibility();
 
+  // 打印网络连接摘要（包含IP地址）
+  Serial.println("\n6. 网络连接摘要...");
+  printNetworkSummary();
+
   // 测试4G数据上传
-  Serial.println("\n6. 测试4G数据上传...");
+  Serial.println("\n7. 测试4G数据上传...");
   test4GUpload();
 
   Serial.println("=== 初始化完成 ===");
   Serial.println("4G网络测试程序运行中...");
-  Serial.println("每30秒自动测试一次数据上传");
+  Serial.println("每30秒自动测试一次数据上传（包含IP地址）");
 }
 
 void loop() {
@@ -1296,14 +1436,23 @@ void loop() {
   // 定期检查PDP状态
   checkPDPStatus();
 
-  // 每30秒测试一次4G数据上传
+  // 每30秒测试一次4G数据上传和IP地址检查
   static unsigned long lastTest = 0;
   if (millis() - lastTest > 30000) { // 30秒
     lastTest = millis();
+
+    Serial.println("\n⏰ 定时任务执行 - " + String(millis() / 1000) + "秒");
+
+    // 打印网络摘要（包含最新IP地址）
+    printNetworkSummary();
+
+    // 测试4G数据上传
     if (pdpActive) {
       test4GUpload();
     } else {
       Serial.println("⚠️ PDP未激活，跳过数据上传测试");
     }
+
+    Serial.println("✅ 本轮定时任务完成");
   }
 }
