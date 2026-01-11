@@ -4,12 +4,18 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <time.h>
+#include <Wire.h>
 
 // 是否启用串口打印（调试用），设置为 1 可显示所有网络连接和调试信息
 #define SERIAL_VERBOSE 1
 
 static const int RXPin = 17, TXPin = 18;
 static const uint32_t GPSBaud = 115200;
+
+// MAX17048 I2C电池电量计配置
+#define MAX17048_I2C_ADDRESS 0x36
+#define MAX17048_SDA_PIN 15
+#define MAX17048_SCL_PIN 16
 
 // 彩灯引脚和数量定义
 #define LED_STRIP_PIN    38    // WS2812B彩灯数据引脚（GPIO38）
@@ -637,6 +643,43 @@ String getCurrentIPAddress() {
   }
 
   return ipAddress;
+}
+
+// 获取电池电量 (使用MAX17048芯片)
+int getBatteryLevel() {
+  Serial.println("🔋 获取电池电量 (MAX17048)...");
+
+  Wire.beginTransmission(MAX17048_I2C_ADDRESS);
+  Wire.write(0x02); // SOC register
+  Wire.endTransmission();
+
+  Wire.requestFrom(MAX17048_I2C_ADDRESS, 2);
+  if (Wire.available() >= 2) {
+    uint16_t soc = (Wire.read() << 8) | Wire.read();
+
+    // 限制最大值
+    if (soc > 65535) {
+      soc = 65535;
+    }
+
+    // 转换为百分比 (0-100%)
+    float batteryLevel = (float)soc / 65535.0 * 100.0;
+
+    // 确保在0-100范围内
+    if (batteryLevel < 0) batteryLevel = 0;
+    if (batteryLevel > 100) batteryLevel = 100;
+
+    if (SERIAL_VERBOSE) {
+      Serial.print("电池电量: ");
+      Serial.print(batteryLevel, 1);
+      Serial.println("%");
+    }
+
+    return (int)batteryLevel;
+  } else {
+    Serial.println("⚠️ MAX17048读取失败");
+    return 0;
+  }
 }
 
 // GPS数据解析函数
@@ -1273,6 +1316,9 @@ void setup() {
   // 初始化随机数种子（使用ADC噪声）
   randomSeed(analogRead(0));
 
+  // 初始化I2C用于MAX17048电池电量计
+  Wire.begin(MAX17048_SDA_PIN, MAX17048_SCL_PIN);
+
   strip.begin();
   strip.show(); // 初始化关闭
 
@@ -1477,8 +1523,9 @@ void loop() {
           if (SERIAL_VERBOSE) Serial.println("时间获取失败，设置为空");
         }
 
-        // 获取当前IP地址
+        // 获取当前IP地址和电池电量
         String currentIP = getCurrentIPAddress();
+        int currentBatteryLevel = getBatteryLevel();
 
         String json = "{";
         json += "\"latitude\":";
@@ -1505,6 +1552,9 @@ void loop() {
         json += "\"networkSource\":\"WiFi\",";
         json += "\"networkCount\":";
         json += String(currentGPS.networkCount);
+        json += ",";
+        json += "\"batteryLevel\":";
+        json += String(currentBatteryLevel);
         json += ",";
         json += "\"ipAddress\":\"";
         json += currentIP;
@@ -1569,8 +1619,9 @@ void loop() {
             if (SERIAL_VERBOSE) Serial.println("4G模式：NTP同步不可靠，设置为空让后台处理");
           }
 
-          // 获取当前IP地址
+          // 获取当前IP地址和电池电量
           String currentIP = getCurrentIPAddress();
+          int currentBatteryLevel = getBatteryLevel();
 
           String json = "{";
           json += "\"latitude\":";
@@ -1597,6 +1648,9 @@ void loop() {
           json += "\"networkSource\":\"4G\",";
           json += "\"networkCount\":";
           json += String(currentGPS.networkCount);
+          json += ",";
+          json += "\"batteryLevel\":";
+          json += String(currentBatteryLevel);
           json += ",";
           json += "\"ipAddress\":\"";
           json += currentIP;
@@ -1687,8 +1741,9 @@ void loop() {
         if (SERIAL_VERBOSE) Serial.println("时间获取失败，设置为空");
       }
 
-      // 获取当前IP地址
+      // 获取当前IP地址和电池电量
       String currentIP = getCurrentIPAddress();
+      int currentBatteryLevel = getBatteryLevel();
 
       String json = "{";
       json += "\"latitude\":";
@@ -1715,6 +1770,9 @@ void loop() {
       json += "\"networkSource\":\"WiFi\",";
       json += "\"networkCount\":";
       json += String(currentGPS.networkCount);
+      json += ",";
+      json += "\"batteryLevel\":";
+      json += String(currentBatteryLevel);
       json += ",";
       json += "\"ipAddress\":\"";
       json += currentIP;
@@ -1791,8 +1849,9 @@ void loop() {
           if (SERIAL_VERBOSE) Serial.println("4G模式：NTP同步不可靠，设置为空让后台处理");
         }
 
-        // 获取当前IP地址
+        // 获取当前IP地址和电池电量
         String currentIP = getCurrentIPAddress();
+        int currentBatteryLevel = getBatteryLevel();
 
         String json = "{";
         json += "\"latitude\":";
@@ -1819,6 +1878,9 @@ void loop() {
         json += "\"networkSource\":\"4G\",";
         json += "\"networkCount\":";
         json += String(currentGPS.networkCount);
+        json += ",";
+        json += "\"batteryLevel\":";
+        json += String(currentBatteryLevel);
         json += ",";
         json += "\"ipAddress\":\"";
         json += currentIP;

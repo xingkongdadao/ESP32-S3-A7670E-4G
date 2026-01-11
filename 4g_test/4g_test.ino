@@ -7,12 +7,18 @@
 
 #include <Arduino.h>
 #include <time.h>
+#include <Wire.h>
 
 // 是否启用串口打印（调试用），设置为 1 可显示所有网络连接和调试信息
 #define SERIAL_VERBOSE 1
 
 static const int RXPin = 17, TXPin = 18;
 static const uint32_t GPSBaud = 115200;
+
+// MAX17048 I2C电池电量计配置
+#define MAX17048_I2C_ADDRESS 0x36
+#define MAX17048_SDA_PIN 15
+#define MAX17048_SCL_PIN 16
 
 bool simPresent = false;
 bool networkRegistered = false;
@@ -547,6 +553,43 @@ String getCurrentIPAddress() {
   return ipAddress;
 }
 
+// 获取电池电量 (使用MAX17048芯片)
+int getBatteryLevel() {
+  Serial.println("🔋 获取电池电量 (MAX17048)...");
+
+  Wire.beginTransmission(MAX17048_I2C_ADDRESS);
+  Wire.write(0x02); // SOC register
+  Wire.endTransmission();
+
+  Wire.requestFrom(MAX17048_I2C_ADDRESS, 2);
+  if (Wire.available() >= 2) {
+    uint16_t soc = (Wire.read() << 8) | Wire.read();
+
+    // 限制最大值
+    if (soc > 65535) {
+      soc = 65535;
+    }
+
+    // 转换为百分比 (0-100%)
+    float batteryLevel = (float)soc / 65535.0 * 100.0;
+
+    // 确保在0-100范围内
+    if (batteryLevel < 0) batteryLevel = 0;
+    if (batteryLevel > 100) batteryLevel = 100;
+
+    if (SERIAL_VERBOSE) {
+      Serial.print("电池电量: ");
+      Serial.print(batteryLevel, 1);
+      Serial.println("%");
+    }
+
+    return (int)batteryLevel;
+  } else {
+    Serial.println("⚠️ MAX17048读取失败");
+    return 0;
+  }
+}
+
 // 检查PDP状态（独立于LED显示）
 void checkPDPStatus() {
   static unsigned long lastPdpCheck = 0;
@@ -891,6 +934,10 @@ void test4GUpload() {
     Serial.println("⚠️ 未获取到IP地址，使用空字符串");
   }
 
+  // 获取电池电量 (MAX17048)
+  int currentBatteryLevel = getBatteryLevel();
+  sensorData.batteryLevel = currentBatteryLevel;
+
   // 创建测试GPS数据（模拟定位数据）
   double latitude = 39.904200;      // 北京的纬度
   double longitude = 116.407396;    // 北京的经度
@@ -942,6 +989,9 @@ void test4GUpload() {
   json += "\"networkSource\":\"4G\",";
   json += "\"networkCount\":";
   json += String(sensorData.networkCount);
+  json += ",";
+  json += "\"batteryLevel\":";
+  json += String(sensorData.batteryLevel);
   json += ",";
   json += "\"ipAddress\":\"";
   json += currentIP;
@@ -1316,6 +1366,9 @@ void printNetworkSummary() {
 void setup() {
   Serial.begin(115200);
   Serial1.begin(GPSBaud, SERIAL_8N1, RXPin, TXPin);
+
+  // 初始化I2C用于MAX17048电池电量计
+  Wire.begin(MAX17048_SDA_PIN, MAX17048_SCL_PIN);
 
   Serial.println("=== ESP32-S3 A7670E 4G Network Test ===");
   Serial.println("4G网络连接和数据上传测试程序");
