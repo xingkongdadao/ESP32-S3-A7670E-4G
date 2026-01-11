@@ -57,9 +57,8 @@ const char* WIFI_SSID = "iPhone13";
 const char* WIFI_PASS = "1234567890";
 
 // 后台 API 配置
-static const char GEO_SENSOR_API_BASE_URL[] = "https://manage.gogotrans.com/api/device/geoSensor/";
+static const char GEO_SENSOR_API_BASE_URL[] = "https://manage.gogotrans.com/api/microcontrollerInstanceDevice/";
 static const char GEO_SENSOR_KEY[] = "mcu_5e3abda8585e4bc79af89ad57af8b3b7";
-static const char GEO_SENSOR_ID[] = "6df617a4-e332-11f0-abbb-9ed80c0d9d5f";
 
 unsigned long lastUpload = 0;
 const unsigned long UPLOAD_INTERVAL = 10000; // 10秒
@@ -153,7 +152,7 @@ bool syncTimeFromServer() {
   }
 
   // 2. 设置URL (使用后台服务器的时间端点，如果没有专门的端点就用API根路径)
-  String timeUrl = "https://manage.gogotrans.com/api/device/geoSensor/";
+  String timeUrl = String(GEO_SENSOR_API_BASE_URL);
   String urlCmd = "AT+HTTPPARA=\"URL\",\"" + timeUrl + "\"";
   SentSerial(urlCmd.c_str());
   if (!waitForResponse("OK", 5000)) {
@@ -1388,7 +1387,7 @@ void loop() {
         json += "\"networkSource\":\"WiFi\"";
         json += "}";
 
-        String fullUrl = String(GEO_SENSOR_API_BASE_URL) + String(GEO_SENSOR_ID) + String("/");
+        String fullUrl = String(GEO_SENSOR_API_BASE_URL);
         if (SERIAL_VERBOSE) {
           Serial.println("正在通过 WiFi 上传数据 (PATCH)...");
           Serial.println("目标URL: " + fullUrl);
@@ -1471,7 +1470,7 @@ void loop() {
           json += "\"networkSource\":\"4G\"";
           json += "}";
 
-          String fullUrl = String(GEO_SENSOR_API_BASE_URL) + String(GEO_SENSOR_ID) + String("/");
+          String fullUrl = String(GEO_SENSOR_API_BASE_URL);
           if (SERIAL_VERBOSE) {
             Serial.println("正在通过 4G 网络上传数据 (PATCH)...");
             Serial.println("目标URL: " + fullUrl);
@@ -1675,7 +1674,7 @@ void loop() {
         json += "\"networkSource\":\"4G\"";
         json += "}";
 
-        String fullUrl = String(GEO_SENSOR_API_BASE_URL) + String(GEO_SENSOR_ID) + String("/");
+        String fullUrl = String(GEO_SENSOR_API_BASE_URL);
         if (SERIAL_VERBOSE) {
           Serial.println("正在通过 4G 网络上传数据 (PATCH)...");
           Serial.println("目标URL: " + fullUrl);
