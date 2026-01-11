@@ -1042,9 +1042,45 @@ void configureAPNAndActivatePDP() {
     return;
   }
 
-  // 常用 APN 列表，按优先级尝试
-  const char* apnList[] = {"internet", "web", "cmnet", "cmwap", "3gnet", "uninet"};
-  const int apnCount = sizeof(apnList) / sizeof(apnList[0]);
+  // 检测运营商信息，智能选择APN
+  if (SERIAL_VERBOSE) Serial.println("检测运营商信息...");
+  SentSerial("AT+COPS?");
+  delay(2000);
+
+  // 获取运营商信息
+  String operatorInfo = "";
+  while (Serial1.available()) {
+    char c = Serial1.read();
+    operatorInfo += c;
+  }
+
+  if (SERIAL_VERBOSE) {
+    Serial.println("运营商信息: " + operatorInfo);
+  }
+
+  // 智能选择APN列表
+  const char** apnList;
+  int apnCount;
+
+  if (operatorInfo.indexOf("CHINA MOBILE") != -1 || operatorInfo.indexOf("46000") != -1 || operatorInfo.indexOf("46002") != -1) {
+    // 中国移动
+    if (SERIAL_VERBOSE) Serial.println("检测到中国移动运营商，使用移动APN列表");
+    static const char* cmccAPNs[] = {"cmnet", "cmwap", "internet"};
+    apnList = cmccAPNs;
+    apnCount = 3;
+  } else if (operatorInfo.indexOf("CHINA UNICOM") != -1 || operatorInfo.indexOf("46001") != -1) {
+    // 中国联通
+    if (SERIAL_VERBOSE) Serial.println("检测到中国联通运营商，使用联通APN列表");
+    static const char* cuccAPNs[] = {"3gnet", "uninet", "internet"};
+    apnList = cuccAPNs;
+    apnCount = 3;
+  } else {
+    // 其他运营商或未知，使用通用APN
+    if (SERIAL_VERBOSE) Serial.println("未知运营商或自动检测失败，使用通用APN列表");
+    static const char* generalAPNs[] = {"internet", "web", "cmnet", "3gnet"};
+    apnList = generalAPNs;
+    apnCount = 4;
+  }
 
   for (int i = 0; i < apnCount; i++) {
     String apn = apnList[i];
@@ -1579,7 +1615,7 @@ void loop() {
       json += "\"networkSource\":\"WiFi\"";
       json += "}";
 
-      String fullUrl = String(GEO_SENSOR_API_BASE_URL) + String(GEO_SENSOR_ID) + String("/");
+      String fullUrl = String(GEO_SENSOR_API_BASE_URL);
       if (SERIAL_VERBOSE) {
         Serial.println("正在通过 WiFi 上传数据 (PATCH)...");
         Serial.println("目标URL: " + fullUrl);

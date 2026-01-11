@@ -551,6 +551,30 @@ void checkPDPStatus() {
   pdpActive = lastPdpStatus;
 }
 
+// 运营商APN配置表
+struct OperatorAPN {
+  const char* operatorName;
+  const char* apn;
+  const char* description;
+};
+
+OperatorAPN operatorAPNs[] = {
+  // 中国移动
+  {"CMCC", "cmnet", "中国移动CMNET"},
+  {"CMCC", "cmwap", "中国移动CMWAP"},
+  {"CMCC", "internet", "中国移动通用"},
+  // 中国联通
+  {"CUCC", "3gnet", "中国联通3GNET"},
+  {"CUCC", "uninet", "中国联通UNINET"},
+  {"CUCC", "internet", "中国联通通用"},
+  // 中国电信
+  {"CTCC", "ctnet", "中国电信CTNET"},
+  {"CTCC", "internet", "中国电信通用"},
+  // 通用APN
+  {"GENERAL", "internet", "通用互联网"},
+  {"GENERAL", "web", "通用WEB"}
+};
+
 void configureAPNAndActivatePDP() {
   Serial.println("🔧🔧🔧 CONFIGURE_APN_START - 开始配置 APN 和 PDP 🔧🔧🔧");
   if (SERIAL_VERBOSE) Serial.println("开始配置 APN 和 PDP...");
@@ -579,9 +603,65 @@ void configureAPNAndActivatePDP() {
     return;
   }
 
-  // 常用 APN 列表，按优先级尝试
-  const char* apnList[] = {"internet", "web", "cmnet", "cmwap", "3gnet", "uninet"};
-  const int apnCount = sizeof(apnList) / sizeof(apnList[0]);
+  // 检测运营商信息
+  Serial.println("📡 检测运营商信息...");
+  SentSerial("AT+COPS?");
+  delay(2000);
+
+  // 获取运营商信息
+  String operatorInfo = "";
+  while (Serial1.available()) {
+    char c = Serial1.read();
+    operatorInfo += c;
+  }
+
+  Serial.println("运营商信息: " + operatorInfo);
+
+  // 智能选择APN列表
+  const char** apnList;
+  int apnCount;
+
+  if (operatorInfo.indexOf("CHINA MOBILE") != -1 || operatorInfo.indexOf("46000") != -1 || operatorInfo.indexOf("46002") != -1) {
+    // 中国移动
+    Serial.println("📱 检测到中国移动运营商，使用移动APN列表");
+    static const char* cmccAPNs[] = {"cmnet", "cmwap", "internet"};
+    apnList = cmccAPNs;
+    apnCount = 3;
+  } else if (operatorInfo.indexOf("CHINA UNICOM") != -1 || operatorInfo.indexOf("46001") != -1) {
+    // 中国联通
+    Serial.println("📱 检测到中国联通运营商，使用联通APN列表");
+    static const char* cuccAPNs[] = {"3gnet", "uninet", "internet"};
+    apnList = cuccAPNs;
+    apnCount = 3;
+  } else   if (operatorInfo.indexOf("MOBIFONE") != -1 || operatorInfo.indexOf("45201") != -1) {
+    // 越南Mobilfone
+    Serial.println("🇻🇳 检测到越南Mobilfone运营商，使用Mobilfone APN列表");
+    Serial.println("✅ Mobilfone SIM卡已确认支持，专注于解决硬件连接问题");
+    static const char* mobifoneAPNs[] = {"m-wap", "internet", "wap"};
+    apnList = mobifoneAPNs;
+    apnCount = 3;
+  } else if (operatorInfo.indexOf("VIETTEL") != -1 || operatorInfo.indexOf("45204") != -1) {
+    // 越南Viettel
+    Serial.println("🇻🇳 检测到越南Viettel运营商，使用Viettel APN列表");
+    Serial.println("⚠️ 注意: A7670E模块对越南运营商支持有限，连接可能不稳定");
+    static const char* viettelAPNs[] = {"v-internet", "internet", "wap"};
+    apnList = viettelAPNs;
+    apnCount = 3;
+  } else if (operatorInfo.indexOf("VINAPHONE") != -1 || operatorInfo.indexOf("45202") != -1) {
+    // 越南Vinaphone
+    Serial.println("🇻🇳 检测到越南Vinaphone运营商，使用Vinaphone APN列表");
+    Serial.println("⚠️ 注意: A7670E模块对越南运营商支持有限，连接可能不稳定");
+    static const char* vinaphoneAPNs[] = {"m3-world", "internet", "wap"};
+    apnList = vinaphoneAPNs;
+    apnCount = 3;
+  } else {
+    // 其他国际运营商或未知，使用通用APN
+    Serial.println("🌏 未知或国际运营商，使用通用APN列表");
+    Serial.println("💡 国际SIM卡可能需要手动配置运营商和APN");
+    static const char* generalAPNs[] = {"internet", "web", "wap"};
+    apnList = generalAPNs;
+    apnCount = 3;
+  }
 
   for (int i = 0; i < apnCount; i++) {
     String apn = apnList[i];
@@ -777,12 +857,360 @@ void test4GUpload() {
   Serial.println("=== 4G网络测试完成 ===\n");
 }
 
+// SIM卡兼容性诊断
+void diagnoseSIMCompatibility() {
+  Serial.println("\n🔍🔍🔍 SIM卡兼容性诊断开始 🔍🔍🔍");
+
+  // 1. 检查SIM卡状态
+  Serial.println("\n1. 检查SIM卡状态...");
+
+  // 首先检查模块电源和基本状态
+  Serial.println("1.1 检查模块基本状态...");
+  SentSerial("AT");
+  delay(500);
+  String basicStatus = readSerialData();
+  if (basicStatus.indexOf("OK") == -1) {
+    Serial.println("❌ 模块无响应 - 检查电源和连接");
+    return;
+  }
+  Serial.println("✅ 模块响应正常");
+
+  // 检查SIM卡检测引脚状态
+  Serial.println("\n1.2 检查SIM卡检测...");
+  SentSerial("AT+CSMINS?");
+  delay(500);
+  String simDetect = readSerialData();
+  Serial.println("SIM检测状态: " + simDetect);
+
+  if (simDetect.indexOf("+CSMINS: 0,1") != -1) {
+    Serial.println("✅ SIM卡检测正常");
+  } else if (simDetect.indexOf("+CSMINS: 0,0") != -1) {
+    Serial.println("❌ SIM卡未检测到 - 硬件连接问题");
+    Serial.println("💡 检查SIM卡槽和卡的物理连接");
+  }
+
+  // 正式检查SIM卡状态
+  Serial.println("\n1.3 检查SIM卡状态...");
+  SentSerial("AT+CPIN?");
+  delay(1000);
+  String simStatus = readSerialData();
+  Serial.println("SIM状态: " + simStatus);
+
+  if (simStatus.indexOf("READY") != -1) {
+    Serial.println("✅ SIM卡状态正常");
+  } else if (simStatus.indexOf("SIM PIN") != -1) {
+    Serial.println("⚠️ SIM卡需要PIN码 - 请检查PIN码设置");
+    Serial.println("💡 尝试命令: AT+CPIN=\"1234\" (替换为实际PIN码)");
+  } else if (simStatus.indexOf("SIM PUK") != -1) {
+    Serial.println("❌ SIM卡被PUK锁定 - 需要PUK码解锁");
+  } else if (simStatus.indexOf("SIM not inserted") != -1) {
+    Serial.println("❌ SIM卡未检测到 - 硬件连接或模块问题");
+
+    // 检查是否为国际SIM卡
+    SentSerial("AT+CIMI");
+    delay(1000);
+    String imsiInfo = readSerialData();
+    Serial.println("IMSI信息: " + imsiInfo);
+
+    bool isMobilfoneSIM = false;
+    if (imsiInfo.length() > 10) {
+      // 检查IMSI前5位 (MNC - Mobile Network Code)
+      String mcc_mnc = imsiInfo.substring(0, 5);
+      if (mcc_mnc == "45201") {
+        isMobilfoneSIM = true;
+        Serial.println("🇻🇳 确认: 检测到越南Mobilfone SIM卡 (MCC-MNC: " + mcc_mnc + ")");
+        Serial.println("✅ SIM卡本身支持Mobilfone，问题在于硬件连接或模块配置");
+      } else if (imsiInfo.substring(0, 3) == "452") {
+        Serial.println("🇻🇳 检测到其他越南运营商SIM卡 (MCC: 452)");
+      } else {
+        Serial.println("🌏 检测到其他国际SIM卡 (MCC: " + imsiInfo.substring(0, 3) + ")");
+      }
+    }
+
+    Serial.println("🔧 Mobilfone SIM卡故障排除步骤:");
+
+    Serial.println("\n   紧急检查:");
+    Serial.println("   □ 确认SIM卡金手指清洁无氧化");
+    Serial.println("   □ 尝试用力按压SIM卡，确保完全接触");
+    Serial.println("   □ 检查是否有SIM卡适配器问题 (标准SIM卡?)");
+    Serial.println("   □ 测量SIM卡槽供电电压 (应该有1.8V或3.3V)");
+
+    Serial.println("\n   模块重置步骤:");
+    Serial.println("   □ 执行: AT+CFUN=0 (关闭射频)");
+    Serial.println("   □ 等待5秒");
+    Serial.println("   □ 执行: AT+CFUN=1 (重新开启)");
+    Serial.println("   □ 等待10秒让模块重新检测SIM卡");
+
+    Serial.println("\n   手动SIM卡检测:");
+    Serial.println("   □ AT+CSMINS? (检查SIM卡检测状态)");
+    Serial.println("   □ AT+CPIN? (再次检查PIN状态)");
+    Serial.println("   □ AT+CSIM=? (检查SIM卡接口电压)");
+
+    Serial.println("\n   替代测试:");
+    Serial.println("   □ 尝试其他Mobilfone SIM卡");
+    Serial.println("   □ 尝试中国运营商SIM卡 (验证卡槽是否正常)");
+    Serial.println("   □ 在另一部手机上测试此SIM卡是否正常工作");
+
+    if (isMobilfoneSIM) {
+      Serial.println("\n   Mobilfone特定配置:");
+      Serial.println("   □ 手动设置APN: AT+CGDCONT=1,\"IP\",\"m-wap\"");
+      Serial.println("   □ 手动选择运营商: AT+COPS=1,2,\"45201\",7");
+      Serial.println("   □ 强制网络注册: AT+CGATT=1");
+    }
+
+    Serial.println("\n   硬件故障可能性:");
+    Serial.println("   □ SIM卡槽硬件损坏");
+    Serial.println("   □ A7670E模块SIM卡接口故障");
+    Serial.println("   □ 供电电压不稳定");
+    Serial.println("   □ ESP32与A7670E通信线路问题");
+
+    return; // SIM卡检测失败，停止后续诊断
+  } else if (simStatus.indexOf("ERROR") != -1) {
+    Serial.println("❌ SIM卡操作失败 - 可能SIM卡损坏或通信问题");
+    Serial.println("💡 检查: 1) SIM卡是否损坏 2) 通信线路是否正常 3) 模块是否故障");
+    return;
+  } else {
+    Serial.println("ℹ️ SIM卡状态未知: " + simStatus);
+  }
+
+  // 2. 检查运营商信息
+  Serial.println("\n2. 检查运营商信息...");
+  SentSerial("AT+COPS?");
+  delay(2000);
+  String operatorInfo = readSerialData();
+  Serial.println("运营商信息: " + operatorInfo);
+
+  if (operatorInfo.indexOf("+COPS:") != -1) {
+    Serial.println("✅ 运营商信息获取成功");
+    if (operatorInfo.indexOf("CHINA MOBILE") != -1) {
+      Serial.println("📱 检测到: 中国移动");
+    } else if (operatorInfo.indexOf("CHINA UNICOM") != -1) {
+      Serial.println("📱 检测到: 中国联通");
+    } else if (operatorInfo.indexOf("CHINA TELECOM") != -1) {
+      Serial.println("📱 检测到: 中国电信");
+    }
+  } else if (operatorInfo.indexOf("ERROR") != -1) {
+    Serial.println("❌ 无法获取运营商信息 - 网络服务不可用");
+    Serial.println("💡 原因可能: 1) 无SIM卡 2) SIM卡锁定 3) 无信号 4) 区域限制");
+  } else {
+    Serial.println("⚠️ 运营商信息未知");
+  }
+
+  // 3. 检查信号质量
+  Serial.println("\n3. 检查信号质量...");
+  SentSerial("AT+CSQ");
+  delay(1000);
+  String signalInfo = readSerialData();
+  Serial.println("信号质量: " + signalInfo);
+
+  // 解析信号强度
+  if (signalInfo.indexOf("+CSQ:") != -1) {
+    int colonPos = signalInfo.indexOf(":");
+    int commaPos = signalInfo.indexOf(",", colonPos);
+    if (commaPos != -1) {
+      String rssiStr = signalInfo.substring(colonPos + 1, commaPos);
+      rssiStr.trim();
+      int rssi = rssiStr.toInt();
+
+      if (rssi == 99) {
+        Serial.println("❌ 无信号 - 请检查天线连接和位置");
+      } else if (rssi >= 0 && rssi <= 10) {
+        Serial.println("⚠️ 信号很弱 - 可能影响连接稳定性");
+      } else if (rssi >= 11 && rssi <= 20) {
+        Serial.println("✅ 信号一般 - 可以尝试连接");
+      } else if (rssi >= 21 && rssi <= 31) {
+        Serial.println("✅ 信号良好");
+      } else {
+        Serial.println("ℹ️ 信号强度: " + String(rssi));
+      }
+    }
+  }
+
+  // 4. 检查网络注册状态
+  Serial.println("\n4. 检查网络注册状态...");
+  SentSerial("AT+CGREG?");
+  delay(1000);
+  String regStatus = readSerialData();
+  Serial.println("网络注册: " + regStatus);
+
+  if (regStatus.indexOf("+CGREG: 0,1") != -1) {
+    Serial.println("✅ 已注册到本地网络");
+  } else if (regStatus.indexOf("+CGREG: 0,5") != -1) {
+    Serial.println("✅ 已注册到漫游网络");
+  } else if (regStatus.indexOf("+CGREG: 0,2") != -1) {
+    Serial.println("🔄 正在搜索网络...");
+  } else if (regStatus.indexOf("+CGREG: 0,0") != -1) {
+    Serial.println("❌ 未注册，正在搜索...");
+    Serial.println("💡 可能原因: 1) 无信号覆盖 2) SIM卡问题 3) 运营商锁定");
+  } else if (regStatus.indexOf("+CGREG: 0,3") != -1) {
+    Serial.println("❌ 注册被拒绝");
+    Serial.println("💡 检查SIM卡是否被运营商停机或锁定");
+  } else {
+    Serial.println("⚠️ 网络注册状态未知");
+  }
+
+  // 5. 检查模块频段支持
+  Serial.println("\n5. 检查模块频段支持...");
+  SentSerial("AT+CNBP=?");
+  delay(1000);
+  String bandInfo = readSerialData();
+  Serial.println("支持频段: " + bandInfo);
+
+  // 6. 尝试手动网络搜索
+  Serial.println("\n6. 执行手动网络搜索...");
+  SentSerial("AT+COPS=?");
+  delay(10000); // 网络搜索需要时间
+  String networkList = readSerialData();
+
+  if (networkList.length() > 20) {
+    Serial.println("✅ 发现可用网络:");
+    Serial.println(networkList);
+  } else {
+    Serial.println("❌ 未发现可用网络");
+  }
+
+  // 7. 诊断总结和恢复建议
+  Serial.println("\n📋📋📋 诊断总结 📋📋📋");
+
+  bool simOk = simStatus.indexOf("READY") != -1;
+  bool networkOk = operatorInfo.indexOf("+COPS:") != -1;
+  bool signalOk = signalInfo.indexOf("+CSQ:") != -1;
+  bool regOk = regStatus.indexOf("+CGREG: 0,1") != -1 || regStatus.indexOf("+CGREG: 0,5") != -1;
+
+  Serial.println("SIM卡状态: " + String(simOk ? "✅" : "❌"));
+  Serial.println("运营商识别: " + String(networkOk ? "✅" : "❌"));
+  Serial.println("信号质量: " + String(signalOk ? "✅" : "❌"));
+  Serial.println("网络注册: " + String(regOk ? "✅" : "❌"));
+
+  // 提供具体的恢复步骤
+  Serial.println("\n🔧🔧🔧 恢复建议 🔧🔧🔧");
+
+  if (!simOk) {
+    Serial.println("❌ SIM卡问题:");
+    Serial.println("   1. 检查SIM卡是否正确插入卡槽");
+    Serial.println("   2. 确认SIM卡未过期或损坏");
+    Serial.println("   3. 尝试另一张SIM卡测试");
+    Serial.println("   4. 如果需要PIN码，输入: AT+CPIN=\"1234\"");
+
+    Serial.println("\n⏭️  请修复SIM卡问题后重新运行测试");
+    return;
+  }
+
+  if (!signalOk) {
+    Serial.println("❌ 信号问题:");
+    Serial.println("   1. 检查4G天线是否正确连接");
+    Serial.println("   2. 移动到室外或信号更好的位置");
+    Serial.println("   3. 确认当地有该运营商的网络覆盖");
+    Serial.println("   4. 尝试手动搜索网络: AT+COPS=?");
+  }
+
+  if (!networkOk) {
+    Serial.println("❌ 运营商识别失败:");
+    Serial.println("   1. 确认SIM卡所属运营商");
+    Serial.println("   2. 检查SIM卡是否被运营商停机");
+    Serial.println("   3. 确认模块支持该运营商的频段");
+    Serial.println("   4. 尝试手动设置运营商: AT+COPS=0,2,\"46000\" (移动)");
+  }
+
+  if (!regOk) {
+    Serial.println("❌ 网络注册失败:");
+    Serial.println("   1. 等待2-3分钟让模块完成自动注册");
+    Serial.println("   2. 重启ESP32和A7670E模块");
+    Serial.println("   3. 尝试手动注册: AT+CGATT=1");
+    Serial.println("   4. 检查APN设置是否正确");
+  }
+
+  if (simOk && networkOk && signalOk && regOk) {
+    Serial.println("✅ 所有诊断项目通过 - SIM卡应该可以正常工作");
+
+    // 检查是否为Mobilfone SIM卡，提供专门建议
+    if (operatorInfo.indexOf("45201") != -1 || operatorInfo.indexOf("MOBIFONE") != -1) {
+      Serial.println("🇻🇳 Mobilfone SIM卡配置建议:");
+      Serial.println("   ✅ SIM卡支持已确认，问题在于网络连接");
+      Serial.println("   • 推荐APN: AT+CGDCONT=1,\"IP\",\"m-wap\"");
+      Serial.println("   • 手动选择运营商: AT+COPS=1,2,\"45201\",7");
+      Serial.println("   • 如果失败，尝试: AT+COPS=0,2 (自动选择)");
+    } else if (operatorInfo.indexOf("452") != -1) { // 其他越南运营商
+      Serial.println("🇻🇳 其他越南运营商配置建议:");
+      Serial.println("   • Viettel: AT+CGDCONT=1,\"IP\",\"v-internet\"");
+      Serial.println("   • Vinaphone: AT+CGDCONT=1,\"IP\",\"m3-world\"");
+      Serial.println("   • 自动选择: AT+COPS=0,2");
+    } else {
+      Serial.println("💡 如果APN配置仍然失败，尝试手动设置:");
+      Serial.println("   中国移动: AT+CGDCONT=1,\"IP\",\"cmnet\"");
+      Serial.println("   中国联通: AT+CGDCONT=1,\"IP\",\"3gnet\"");
+      Serial.println("   中国电信: AT+CGDCONT=1,\"IP\",\"ctnet\"");
+    }
+  }
+
+  Serial.println("\n📞 如果问题持续存在:");
+  Serial.println("   1. 记录完整的诊断输出");
+  Serial.println("   2. 确认SIM卡运营商和状态");
+  Serial.println("   3. 测试模块是否支持该运营商频段");
+  Serial.println("   4. 对于国际SIM卡，建议使用中国大陆运营商的SIM卡");
+  Serial.println("   5. 联系模块供应商确认国际兼容性");
+
+  Serial.println("\n🔍🔍🔍 SIM卡兼容性诊断完成 🔍🔍🔍\n");
+}
+
+// 读取串口数据
+String readSerialData() {
+  String data = "";
+  unsigned long start = millis();
+
+  while (millis() - start < 2000) {
+    if (Serial1.available()) {
+      char c = Serial1.read();
+      data += c;
+    }
+    delay(10);
+  }
+
+  return data;
+}
+
 void setup() {
   Serial.begin(115200);
   Serial1.begin(GPSBaud, SERIAL_8N1, RXPin, TXPin);
 
   Serial.println("=== ESP32-S3 A7670E 4G Network Test ===");
   Serial.println("4G网络连接和数据上传测试程序");
+  Serial.println();
+
+  // 添加快速SIM卡检查
+  Serial.println("快速SIM卡检查:");
+  SentSerial("AT+CPIN?");
+  delay(1000);
+  String quickSimCheck = readSerialData();
+  if (quickSimCheck.indexOf("READY") != -1) {
+    Serial.println("✅ SIM卡就绪");
+
+    // 检查是否为Mobilfone SIM卡
+    SentSerial("AT+CIMI");
+    delay(1000);
+    String imsiCheck = readSerialData();
+    if (imsiCheck.length() > 10) {
+      String mcc_mnc = imsiCheck.substring(0, 5);
+      if (mcc_mnc == "45201") {
+        Serial.println("🇻🇳 检测到越南Mobilfone SIM卡 (MCC-MNC: " + mcc_mnc + ")");
+        Serial.println("✅ SIM卡支持已确认 - 硬件连接正常，准备进行网络配置");
+      } else if (imsiCheck.substring(0, 3) == "452") {
+        Serial.println("🇻🇳 检测到其他越南运营商SIM卡 (MCC: 452)");
+      } else {
+        Serial.println("📋 SIM卡信息: " + mcc_mnc + " (非越南运营商)");
+      }
+    }
+  } else if (quickSimCheck.indexOf("SIM not inserted") != -1) {
+    Serial.println("❌ SIM卡未检测到 - 硬件连接问题");
+    Serial.println("🔧 Mobilfone SIM卡紧急修复步骤:");
+    Serial.println("   1. 清洁SIM卡金手指，确保无氧化");
+    Serial.println("   2. 确认SIM卡完全插入并用力按压");
+    Serial.println("   3. 执行模块重置: AT+CFUN=0, 等待5秒, AT+CFUN=1");
+    Serial.println("   4. 如果仍然失败，检查卡槽是否损坏");
+  } else {
+    Serial.println("⚠️ SIM卡状态异常: " + quickSimCheck);
+    Serial.println("💡 将进行详细诊断以确定具体问题");
+  }
   Serial.println();
 
   // 配置NTP时间同步
@@ -821,6 +1249,16 @@ void setup() {
   Serial.println("\n2. 获取模块信息...");
   SentSerial("ATI");
   SentSerial("AT+SIMCOMATI");
+
+  // 检查模块频段支持
+  Serial.println("\n2.1 检查模块频段支持...");
+  SentSerial("AT+CNBP=?");  // 频段查询
+  delay(1000);
+
+  // 检查网络注册状态
+  Serial.println("\n2.2 检查网络注册状态...");
+  SentSerial("AT+CREG?");   // GSM网络注册
+  SentSerial("AT+CGREG?");  // GPRS网络注册
   delay(2000);
 
   // 配置APN和激活PDP
@@ -831,8 +1269,12 @@ void setup() {
   Serial.println("\n4. 等待网络稳定...");
   delay(5000);
 
+  // 执行SIM卡兼容性诊断
+  Serial.println("5. 执行SIM卡兼容性诊断...");
+  diagnoseSIMCompatibility();
+
   // 测试4G数据上传
-  Serial.println("5. 测试4G数据上传...");
+  Serial.println("\n6. 测试4G数据上传...");
   test4GUpload();
 
   Serial.println("=== 初始化完成 ===");
