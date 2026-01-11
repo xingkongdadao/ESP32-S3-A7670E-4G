@@ -20,7 +20,7 @@ bool pdpActive = false;  // 全局PDP状态变量
 
 // 后台 API 配置
 static const char GEO_SENSOR_API_BASE_URL[] = "https://manage.gogotrans.com/api/microcontrollerInstanceDevice/";
-static const char GEO_SENSOR_KEY[] = "mcu_5e3abda8585e4bc79af89ad57af8b3b7";
+static const char GEO_SENSOR_KEY[] = "mcu_5e3abda8585e4bc79af89ad57af8b3b9";
 
 
 unsigned long lastUpload = 0;
