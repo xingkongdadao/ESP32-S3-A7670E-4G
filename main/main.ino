@@ -36,6 +36,7 @@ struct GPSData {
   String locationSource = "GPS"; // 定位来源: GPS 或 LBS
   unsigned long lastUpdate = 0;
   String ipAddress = "";  // IP地址
+  int networkCount = 0;   // 信号强度 (0-31)
 };
 
 GPSData currentGPS;
@@ -1058,6 +1059,16 @@ void parseModuleResponse(const String &response) {
     if (response.indexOf("+CSQ:") != -1) {
       Serial.print("信号强度: ");
       Serial.println(response);
+
+      // 解析信号强度并存储到GPS数据中
+      int colonPos = response.indexOf(":");
+      int commaPos = response.indexOf(",", colonPos);
+      if (commaPos != -1) {
+        String rssiStr = response.substring(colonPos + 1, commaPos);
+        rssiStr.trim();
+        int rssi = rssiStr.toInt();
+        currentGPS.networkCount = rssi;
+      }
     }
     if (response.indexOf("+COPS:") != -1) {
       Serial.print("运营商信息: ");
@@ -1356,6 +1367,7 @@ void setup() {
   SentSerial("AT+COPS?");
   SentSerial("AT+CGDCONT?");
   SentSerial("AT+CGREG?");
+  SentSerial("AT+CSQ");  // 查询信号强度
   SentSerial("AT+SIMCOMATI");
 
   // 配置 APN 和激活 PDP
@@ -1491,6 +1503,9 @@ void loop() {
         json += String(altitudeAccuracy, 2);
         json += ",";
         json += "\"networkSource\":\"WiFi\",";
+        json += "\"networkCount\":";
+        json += String(currentGPS.networkCount);
+        json += ",";
         json += "\"ipAddress\":\"";
         json += currentIP;
         json += "\"";
@@ -1580,6 +1595,9 @@ void loop() {
           json += String(altitudeAccuracy, 2);
           json += ",";
           json += "\"networkSource\":\"4G\",";
+          json += "\"networkCount\":";
+          json += String(currentGPS.networkCount);
+          json += ",";
           json += "\"ipAddress\":\"";
           json += currentIP;
           json += "\"";
@@ -1695,6 +1713,9 @@ void loop() {
       json += String(altitudeAccuracy, 2);
       json += ",";
       json += "\"networkSource\":\"WiFi\",";
+      json += "\"networkCount\":";
+      json += String(currentGPS.networkCount);
+      json += ",";
       json += "\"ipAddress\":\"";
       json += currentIP;
       json += "\"";
@@ -1796,6 +1817,9 @@ void loop() {
         json += String(altitudeAccuracy, 2);
         json += ",";
         json += "\"networkSource\":\"4G\",";
+        json += "\"networkCount\":";
+        json += String(currentGPS.networkCount);
+        json += ",";
         json += "\"ipAddress\":\"";
         json += currentIP;
         json += "\"";

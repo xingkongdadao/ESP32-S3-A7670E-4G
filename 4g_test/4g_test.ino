@@ -32,6 +32,7 @@ struct SensorData {
 
   // 网络信息
   int signalStrength = 0;
+  int networkCount = 0;          // 网络计数 (信号质量)
   String operatorName = "";
   String networkType = "";
   String imsi = "";
@@ -915,7 +916,7 @@ void test4GUpload() {
     dataAcquiredAt = "null";
   }
 
-  // 构建与main.ino相同的JSON格式，添加ipAddress字段
+  // 构建与main.ino相同的JSON格式，添加ipAddress和networkCount字段
   String json = "{";
   json += "\"latitude\":";
   json += String(latitude, 6);
@@ -939,6 +940,9 @@ void test4GUpload() {
   json += String(altitudeAccuracy, 2);
   json += ",";
   json += "\"networkSource\":\"4G\",";
+  json += "\"networkCount\":";
+  json += String(sensorData.networkCount);
+  json += ",";
   json += "\"ipAddress\":\"";
   json += currentIP;
   json += "\"";
@@ -1132,6 +1136,9 @@ void diagnoseSIMCompatibility() {
       rssiStr.trim();
       int rssi = rssiStr.toInt();
 
+      // 将信号强度存储到networkCount字段
+      sensorData.networkCount = rssi;
+
       if (rssi == 99) {
         Serial.println("❌ 无信号 - 请检查天线连接和位置");
       } else if (rssi >= 0 && rssi <= 10) {
@@ -1289,7 +1296,7 @@ String readSerialData() {
   return data;
 }
 
-// 打印网络信息摘要（包含IP地址）
+// 打印网络信息摘要（包含IP地址和信号质量）
 void printNetworkSummary() {
   Serial.println("\n📡 网络连接摘要:");
 
@@ -1298,6 +1305,7 @@ void printNetworkSummary() {
 
   Serial.println("   PDP状态: " + String(pdpActive ? "已激活 ✓" : "未激活 ✗"));
   Serial.println("   IP地址: " + (currentIP.length() > 0 ? currentIP : "未获取"));
+  Serial.printf("   信号质量(networkCount): %d (0-31, 越高越好)\n", sensorData.networkCount);
   Serial.println("   SIM卡状态: " + String(simPresent ? "正常 ✓" : "异常 ✗"));
   Serial.println("   网络注册: " + String(networkRegistered ? "已注册 ✓" : "未注册 ✗"));
 
