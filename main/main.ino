@@ -65,7 +65,7 @@ const char* WIFI_SSID = "iPhone13";
 const char* WIFI_PASS = "1234567890";
 
 // 后台 API 配置
-static const char GEO_SENSOR_API_BASE_URL[] = "https://manage.gogotrans.com/api/microcontrollerInstanceDevice/";
+static const char GEO_SENSOR_API_BASE_URL[] = "https://manage.gogotrans.com/api/microDevice/";
 static const char GEO_SENSOR_KEY[] = "mcu_5e3abda8585e4bc79af89ad57af8b3b7";
 
 unsigned long lastUpload = 0;
